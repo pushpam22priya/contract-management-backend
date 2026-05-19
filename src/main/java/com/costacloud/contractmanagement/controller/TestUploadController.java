@@ -8,6 +8,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.tags.Tag;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -15,6 +21,7 @@ import java.util.UUID;
 
 @RestController
 @RequestMapping("/test")
+@Tag(name = "Test File Upload", description = "Endpoints for testing file uploads to MinIO and MongoDB")
 public class TestUploadController {
 
     private final MinioClient minioClient;
@@ -29,6 +36,11 @@ public class TestUploadController {
     }
 
     @PostMapping(value = "/upload", consumes = "multipart/form-data")
+    @Operation(summary = "Upload a test file", description = "Uploads a file directly to the MinIO bucket and saves metadata to MongoDB.")
+    @ApiResponses(value = {
+            @ApiResponse(responseCode = "200", description = "File uploaded successfully"),
+            @ApiResponse(responseCode = "500", description = "Internal server error during upload", content = @Content)
+    })
     public ResponseEntity<Map<String, Object>> upload(@RequestParam MultipartFile file) {
         Map<String, Object> response = new HashMap<>();
         try {
