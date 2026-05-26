@@ -15,6 +15,8 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+import org.springframework.http.HttpMethod;
+
 
 import java.util.List;
 
@@ -53,6 +55,10 @@ public class SecurityConfig {
                                 "/api-docs",
                                 "/webjars/**"
                         ).permitAll()
+                        .requestMatchers(HttpMethod.GET, "/templates/**").authenticated()
+                        .requestMatchers(HttpMethod.GET, "/categories/**").authenticated()
+                        .requestMatchers("/templates/**").hasRole("ADMIN")
+                        .requestMatchers("/categories/**").hasRole("ADMIN")
                         .requestMatchers("/admin/**").hasRole("ADMIN")
                         .anyRequest().authenticated()
                 )

@@ -9,6 +9,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import io.minio.errors.MinioException;
 
 @RestControllerAdvice(basePackages = "com.costacloud.contractmanagement")
 public class GlobalExceptionHandler {
@@ -42,6 +43,13 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Map<String, Object>> handleException(Exception ex) {
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
                 buildResponse(500, "Internal Server Error", "Something went wrong. Please try again later.")
+        );
+    }
+
+    @ExceptionHandler(MinioException.class)
+    public ResponseEntity<Map<String, Object>> handleMinioException(MinioException ex) {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(
+                buildResponse(503, "Storage Error", "File storage operation failed. Please try again.")
         );
     }
 
