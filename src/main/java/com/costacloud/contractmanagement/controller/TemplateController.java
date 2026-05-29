@@ -92,6 +92,14 @@ public class TemplateController {
                 .body(new InputStreamResource(stream));
     }
 
+    @Operation(summary = "Get presigned URL for viewing PDF directly from MinIO (use with Apryse WebViewer)")
+    @SecurityRequirement(name = "bearerAuth")
+    @GetMapping("/{id}/file/view-url")
+    public ResponseEntity<Map<String, String>> getViewUrl(@PathVariable String id) throws Exception {
+        String url = templateService.generatePresignedViewUrl(id);
+        return ResponseEntity.ok(Map.of("url", url));
+    }
+
     // ─── Chunked Upload Endpoints ────────────────────────────────
 
     @Operation(summary = "Initiate chunked upload")

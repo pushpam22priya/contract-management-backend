@@ -152,6 +152,21 @@ public class TemplateService {
         return new ChunkUploadInitResponse(uploadId, id);
     }
 
+    public String generatePresignedViewUrl(String id) throws Exception {
+        Template template = findById(id);
+        if (!template.isFileUploaded()) {
+            throw new RuntimeException("File not yet uploaded for this template");
+        }
+        return minioClient.getPresignedObjectUrl(
+                GetPresignedObjectUrlArgs.builder()
+                        .method(Method.GET)
+                        .bucket(bucketName)
+                        .object("templates/" + id + ".pdf")
+                        .expiry(15, TimeUnit.MINUTES)
+                        .build()
+        );
+    }
+
     public String generatePresignedPartUrl(String id, String uploadId, int partNumber) throws Exception {
         String objectKey = "templates/" + id + ".pdf";
         Map<String, String> queryParams = new HashMap<>();
