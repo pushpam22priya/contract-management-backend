@@ -75,8 +75,8 @@ public class TemplateController {
     public ResponseEntity<Void> uploadFile(@PathVariable String id,
                                            HttpServletRequest request) throws Exception {
         long fileSize = request.getContentLengthLong();
-        if (fileSize > 50 * 1024 * 1024) {
-            throw new RuntimeException("File size must not exceed 50MB");
+        if (fileSize > 30 * 1024 * 1024) {
+            throw new RuntimeException("File size must not exceed 30MB");
         }
         templateService.uploadFile(id, request.getInputStream(), fileSize);
         return ResponseEntity.ok().build();
