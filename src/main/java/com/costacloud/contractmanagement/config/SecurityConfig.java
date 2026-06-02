@@ -60,6 +60,7 @@ public class SecurityConfig {
                         .requestMatchers("/templates/**").hasRole("ADMIN")
                         .requestMatchers("/categories/**").hasRole("ADMIN")
                         .requestMatchers("/admin/**").hasRole("ADMIN")
+                        .requestMatchers("/teams/**").authenticated()
                         .anyRequest().authenticated()
                 )
                 .exceptionHandling(ex -> ex

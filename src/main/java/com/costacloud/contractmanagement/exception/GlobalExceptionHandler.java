@@ -32,6 +32,20 @@ public class GlobalExceptionHandler {
         );
     }
 
+    @ExceptionHandler(BadRequestException.class)
+    public ResponseEntity<Map<String, Object>> handleBadRequest(BadRequestException ex) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(
+                buildResponse(400, "Bad Request", ex.getMessage())
+        );
+    }
+
+    @ExceptionHandler(NotFoundException.class)
+    public ResponseEntity<Map<String, Object>> handleNotFound(NotFoundException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                buildResponse(404, "Not Found", ex.getMessage())
+        );
+    }
+
     @ExceptionHandler(RuntimeException.class)
     public ResponseEntity<Map<String, Object>> handleRuntimeException(RuntimeException ex) {
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
@@ -39,17 +53,17 @@ public class GlobalExceptionHandler {
         );
     }
 
-    @ExceptionHandler(Exception.class)
-    public ResponseEntity<Map<String, Object>> handleException(Exception ex) {
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
-                buildResponse(500, "Internal Server Error", "Something went wrong. Please try again later.")
-        );
-    }
-
     @ExceptionHandler(MinioException.class)
     public ResponseEntity<Map<String, Object>> handleMinioException(MinioException ex) {
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(
                 buildResponse(503, "Storage Error", "File storage operation failed. Please try again.")
+        );
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<Map<String, Object>> handleException(Exception ex) {
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                buildResponse(500, "Internal Server Error", "Something went wrong. Please try again later.")
         );
     }
 
