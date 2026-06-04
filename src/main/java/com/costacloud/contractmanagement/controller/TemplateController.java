@@ -75,8 +75,11 @@ public class TemplateController {
     public ResponseEntity<Void> uploadFile(@PathVariable String id,
                                            HttpServletRequest request) throws Exception {
         long fileSize = request.getContentLengthLong();
-        if (fileSize > 30 * 1024 * 1024) {
-            throw new RuntimeException("File size must not exceed 30MB");
+        if (fileSize == -1) {
+            throw new RuntimeException("Content-Length header is required");
+        }
+        if (fileSize >= 30 * 1024 * 1024) {
+            throw new RuntimeException("File is 30MB or larger — use the chunked upload endpoints instead: POST /{id}/file/initiate");
         }
         templateService.uploadFile(id, request.getInputStream(), fileSize);
         return ResponseEntity.ok().build();

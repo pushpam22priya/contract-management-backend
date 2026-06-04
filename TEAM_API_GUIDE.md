@@ -244,7 +244,7 @@ curl -X GET http://localhost:8080/teams \
 Updates the name of an existing team. All other fields remain unchanged.
 
 ```
-PATCH /teams/{id}
+PUT /teams/{id}
 ```
 
 **Headers**
@@ -297,7 +297,7 @@ PATCH /teams/{id}
 **curl**
 
 ```bash
-curl -X PATCH http://localhost:8080/teams/TEAM_ID \
+curl -X PUT http://localhost:8080/teams/TEAM_ID \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"name\": \"Legal & Compliance\"}"
@@ -383,7 +383,7 @@ Step 2   POST /teams
 Step 3   GET /teams
          ← [ { id, name, ... }, ... ]   (all teams for this user)
 
-Step 4   PATCH /teams/{id}              (optional — rename)
+Step 4   PUT /teams/{id}                (optional — rename)
          Body: { name: "Legal & Compliance" }
          ← { id, name (updated), updatedAt (updated), ... }
 
@@ -399,5 +399,5 @@ Step 5   DELETE /teams/{id}            (optional — delete when empty)
 |---|---|---|---|
 | POST | `/teams` | Authenticated | Create a new team |
 | GET | `/teams` | Authenticated | List all teams owned by the current user |
-| PATCH | `/teams/{id}` | Authenticated | Rename a team |
+| PUT | `/teams/{id}` | Authenticated | Rename a team |
 | DELETE | `/teams/{id}` | Authenticated | Delete a team (blocked if it has contracts) |

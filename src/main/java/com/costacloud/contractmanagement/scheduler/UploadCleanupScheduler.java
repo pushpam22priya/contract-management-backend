@@ -1,9 +1,12 @@
 package com.costacloud.contractmanagement.scheduler;
 
 import com.costacloud.contractmanagement.config.CustomMinioClient;
+import com.costacloud.contractmanagement.model.Contract;
 import com.costacloud.contractmanagement.model.Template;
-import com.costacloud.contractmanagement.repository.TemplateRepository;
+import com.costacloud.contractmanagement.service.ContractService;
 import com.costacloud.contractmanagement.service.TemplateService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -14,35 +17,60 @@ import java.util.List;
 @Component
 public class UploadCleanupScheduler {
 
+    private static final Logger log = LoggerFactory.getLogger(UploadCleanupScheduler.class);
+
     private final TemplateService templateService;
-    private final TemplateRepository templateRepository;
-    private final CustomMinioClient minioClient;
+    private final ContractService contractService;
+    private final CustomMinioClient customMinioClient;
 
     @Value("${minio.bucket-name}")
     private String bucketName;
 
     public UploadCleanupScheduler(TemplateService templateService,
-                                  TemplateRepository templateRepository,
-                                  CustomMinioClient minioClient) {
+                                  ContractService contractService,
+                                  CustomMinioClient customMinioClient) {
         this.templateService = templateService;
-        this.templateRepository = templateRepository;
-        this.minioClient = minioClient;
+        this.contractService = contractService;
+        this.customMinioClient = customMinioClient;
     }
 
     @Scheduled(cron = "0 0 2 * * *")
-    public void cleanupOrphanedUploads() throws Exception {
+    public void cleanOrphanedUploads() {
         LocalDateTime cutoff = LocalDateTime.now().minusHours(24);
-        List<Template> orphaned = templateService.findOrphanedUploads(cutoff);
 
-        for (Template template : orphaned) {
-            if (template.getUploadId() != null) {
-                minioClient.cancelMultipartUpload(
-                        bucketName,
-                        "templates/" + template.getId() + ".pdf",
-                        template.getUploadId()
-                );
+        // ── Templates: abort MinIO upload + delete record ─────────
+        List<Template> orphanedTemplates = templateService.findOrphanedUploads(cutoff);
+        for (Template template : orphanedTemplates) {
+            try {
+                if (template.getUploadId() != null) {
+                    customMinioClient.cancelMultipartUpload(
+                            bucketName,
+                            "templates/" + template.getId() + ".pdf",
+                            template.getUploadId()
+                    );
+                }
+                templateService.deleteTemplate(template.getId());
+                log.info("Cleaned orphaned template upload: {}", template.getId());
+            } catch (Exception e) {
+                log.warn("Failed to clean template {}: {}", template.getId(), e.getMessage());
             }
-            templateRepository.deleteById(template.getId());
+        }
+
+        // ── Contracts: abort MinIO upload only — keep metadata ────
+        List<Contract> orphanedContracts = contractService.findOrphanedUploads(cutoff);
+        for (Contract contract : orphanedContracts) {
+            try {
+                if (contract.getUploadId() != null) {
+                    customMinioClient.cancelMultipartUpload(
+                            bucketName,
+                            "contracts/" + contract.getId() + ".pdf",
+                            contract.getUploadId()
+                    );
+                }
+                log.info("Cleaned orphaned contract upload: {}", contract.getId());
+            } catch (Exception e) {
+                log.warn("Failed to clean contract {}: {}", contract.getId(), e.getMessage());
+            }
         }
     }
 }

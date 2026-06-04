@@ -1,8 +1,8 @@
 # Contract API Documentation
 
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Base URL:** `http://localhost:8080`  
-**Last Updated:** 2026-06-03
+**Last Updated:** 2026-06-04
 
 ---
 
@@ -321,8 +321,8 @@ POST /contracts
 | templateName     | String  | No       | Display name stored for reference                                           |
 | templateFileName | String  | No       | Original PDF filename stored for reference                                  |
 | description      | String  | No       | Max 500 chars. Auto-filled as `"Contract based on {templateName}"` if omitted |
-| value            | String  | No       | Monetary or descriptive value. Defaults to `"N/A"` if omitted               |
-| category         | String  | No       | Free-text category label                                                    |
+| value            | String  | No       | Monetary or descriptive value. Max 100 chars. Defaults to `"N/A"` if omitted |
+| category         | String  | No       | Free-text category label. Max 50 chars.                                     |
 | startDate        | Date    | No       | `YYYY-MM-DD`. Defaults to today if omitted                                  |
 | endDate          | Date    | No       | `YYYY-MM-DD`. Must be ≥ startDate. Defaults to `startDate + 1 year`         |
 | teamId           | String  | No       | ID of the team to assign this contract to                                   |
@@ -340,15 +340,17 @@ Returns the full [Contract Object](#41-contract-object) with `status: "DRAFT"` a
 
 | Status | Message                                   | Cause                                     |
 |--------|-------------------------------------------|-------------------------------------------|
-| 400    | Contract title is required                | `title` is blank or missing               |
-| 400    | Contract title must be 50 characters or less | `title` exceeds 50 chars               |
-| 400    | Client name is required                   | `client` is blank or missing              |
-| 400    | Client name must be 50 characters or less | `client` exceeds 50 chars                 |
-| 400    | Template ID is required                   | `templateId` is blank or missing          |
-| 400    | Description must be 500 characters or less | `description` exceeds 500 chars          |
-| 400    | End date must be on or after start date   | `endDate` is before `startDate`           |
-| 400    | A contract with this title already exists | Duplicate title for this user             |
-| 401    | Unauthorized                              | Token missing or expired                  |
+| 400    | Contract title is required                   | `title` is blank or missing               |
+| 400    | Contract title must be 50 characters or less | `title` exceeds 50 chars                  |
+| 400    | Client name is required                      | `client` is blank or missing              |
+| 400    | Client name must be 50 characters or less    | `client` exceeds 50 chars                 |
+| 400    | Template ID is required                      | `templateId` is blank or missing          |
+| 400    | Description must be 500 characters or less   | `description` exceeds 500 chars           |
+| 400    | Value must be 100 characters or less         | `value` exceeds 100 chars                 |
+| 400    | Category must be 50 characters or less       | `category` exceeds 50 chars               |
+| 400    | End date must be on or after start date      | `endDate` is before `startDate`           |
+| 400    | A contract with this title already exists    | Duplicate title for this user             |
+| 401    | Unauthorized                                 | Token missing or expired                  |
 
 **curl**
 
@@ -769,7 +771,7 @@ curl -X GET "http://localhost:8080/contracts/CONTRACT_ID/file/presign?uploadId=U
 
 ### 5.9 Complete Chunked Upload
 
-Instructs MinIO to assemble all uploaded parts into the final PDF. Must supply the `uploadId` and the `partNumber` + `ETag` for every part uploaded. On success, the contract's `fileUploaded` is set to `true`.
+Instructs MinIO to assemble all uploaded parts into the final PDF. Must supply the `uploadId` and the `partNumber` + `ETag` for every part uploaded. After assembly, the server reads the first 4 bytes of the assembled file to validate it is a valid PDF. If validation fails, the assembled file is deleted from MinIO and a 400 is returned. On success, the contract's `fileUploaded` is set to `true`.
 
 ```
 POST /contracts/{id}/file/complete
@@ -818,9 +820,10 @@ Empty body. Contract record is updated: `fileUploaded: true`, `uploadId: null`.
 
 | Status | Message            | Cause                                           |
 |--------|--------------------|-------------------------------------------------|
-| 400    | Bad Request        | Missing parts, wrong ETag format, or MinIO error |
-| 401    | Unauthorized       | Token missing or expired                        |
-| 404    | Contract not found | ID doesn't exist or belongs to another user     |
+| 400    | File is not a valid PDF | Assembled file does not start with `%PDF` — file deleted from MinIO |
+| 400    | Bad Request             | Missing parts, wrong ETag format, or MinIO assembly error            |
+| 401    | Unauthorized            | Token missing or expired                                             |
+| 404    | Contract not found      | ID doesn't exist or belongs to another user                          |
 
 **curl**
 
@@ -993,10 +996,11 @@ fileSize ≥ 30 MB  →  initiate → presign → PUT to MinIO → complete
 | endDate default | Defaults to `startDate + 1 year` if not provided. |
 | Date validation | `endDate` must be ≥ `startDate`. Rejected with 400 otherwise. |
 | description default | Auto-generated as `"Contract based on {templateName}"` if not provided. |
-| value default | Defaults to `"N/A"` if not provided. |
+| value | Free text. Max 100 characters. Defaults to `"N/A"` if not provided. |
+| category | Free text. Max 50 characters. |
 | Single-shot limit | Files ≥ 30 MB must use chunked upload. Single-shot returns 400 if `Content-Length ≥ 30MB`. |
 | Content-Length required | The `PUT /{id}/file` endpoint requires `Content-Length` in the request headers. |
-| PDF validation | Single-shot upload validates the `%PDF` magic bytes at the start of the file. |
+| PDF validation | Both upload paths validate the `%PDF` magic bytes. Single-shot validates before storing. Chunked complete validates after assembly — if invalid, the assembled file is deleted from MinIO and 400 is returned. |
 | MinIO chunk minimum | Each part (except the last) must be at least **5 MB** — MinIO requirement. |
 | Presigned URL TTL | All presigned URLs (upload parts and view) expire in **15 minutes**. |
 | fileUploaded flag | Set to `true` only after a successful single-shot upload or chunked complete. |
