@@ -131,7 +131,6 @@ Includes all fields — suitable for the detail/editor view.
   "title": "Service Agreement Q3",
   "client": "Acme Corp",
   "description": "Quarterly service contract for Acme Corp",
-  "value": "10000",
   "category": "Services",
   "status": "DRAFT",
   "startDate": "2026-06-03",
@@ -167,8 +166,7 @@ Includes all fields — suitable for the detail/editor view.
 | title            | String            | Contract display name. Unique per user.                                     |
 | client           | String            | Name of the counterparty                                                    |
 | description      | String            | Auto-generated from templateName if not provided                            |
-| value            | String            | Monetary or descriptive contract value. Defaults to `"N/A"` if not provided |
-| category         | String            | Contract category (e.g. Services, NDA, Employment)                          |
+| category         | String            | Contract category (e.g. Services, NDA, Employment). Max 50 chars.           |
 | status           | ContractStatus    | See [ContractStatus Enum](#44-contractstatus-enum). Always `DRAFT` on create |
 | startDate        | LocalDate         | Defaults to today if not provided                                           |
 | endDate          | LocalDate         | Defaults to `startDate + 1 year` if not provided                            |
@@ -199,7 +197,6 @@ Returned by `GET /contracts`. Lightweight — excludes heavy fields (`xfdfData`,
   "title": "Service Agreement Q3",
   "client": "Acme Corp",
   "description": "Quarterly service contract",
-  "value": "10000",
   "category": "Services",
   "status": "DRAFT",
   "startDate": "2026-06-03",
@@ -291,7 +288,6 @@ POST /contracts
   "templateName": "Standard Service Agreement",
   "templateFileName": "service-agreement.pdf",
   "description": "Quarterly service contract for Acme Corp",
-  "value": "10000",
   "category": "Services",
   "startDate": "2026-06-03",
   "endDate": "2027-06-03",
@@ -321,7 +317,6 @@ POST /contracts
 | templateName     | String  | No       | Display name stored for reference                                           |
 | templateFileName | String  | No       | Original PDF filename stored for reference                                  |
 | description      | String  | No       | Max 500 chars. Auto-filled as `"Contract based on {templateName}"` if omitted |
-| value            | String  | No       | Monetary or descriptive value. Max 100 chars. Defaults to `"N/A"` if omitted |
 | category         | String  | No       | Free-text category label. Max 50 chars.                                     |
 | startDate        | Date    | No       | `YYYY-MM-DD`. Defaults to today if omitted                                  |
 | endDate          | Date    | No       | `YYYY-MM-DD`. Must be ≥ startDate. Defaults to `startDate + 1 year`         |
@@ -346,7 +341,6 @@ Returns the full [Contract Object](#41-contract-object) with `status: "DRAFT"` a
 | 400    | Client name must be 50 characters or less    | `client` exceeds 50 chars                 |
 | 400    | Template ID is required                      | `templateId` is blank or missing          |
 | 400    | Description must be 500 characters or less   | `description` exceeds 500 chars           |
-| 400    | Value must be 100 characters or less         | `value` exceeds 100 chars                 |
 | 400    | Category must be 50 characters or less       | `category` exceeds 50 chars               |
 | 400    | End date must be on or after start date      | `endDate` is before `startDate`           |
 | 400    | A contract with this title already exists    | Duplicate title for this user             |
@@ -504,7 +498,6 @@ Send only the fields you want to change. All fields are optional.
   "title": "Service Agreement Q3 — Revised",
   "client": "Acme Corp Ltd",
   "description": "Updated scope of services",
-  "value": "15000",
   "category": "Services",
   "startDate": "2026-06-03",
   "endDate": "2027-12-31",
@@ -996,7 +989,6 @@ fileSize ≥ 30 MB  →  initiate → presign → PUT to MinIO → complete
 | endDate default | Defaults to `startDate + 1 year` if not provided. |
 | Date validation | `endDate` must be ≥ `startDate`. Rejected with 400 otherwise. |
 | description default | Auto-generated as `"Contract based on {templateName}"` if not provided. |
-| value | Free text. Max 100 characters. Defaults to `"N/A"` if not provided. |
 | category | Free text. Max 50 characters. |
 | Single-shot limit | Files ≥ 30 MB must use chunked upload. Single-shot returns 400 if `Content-Length ≥ 30MB`. |
 | Content-Length required | The `PUT /{id}/file` endpoint requires `Content-Length` in the request headers. |

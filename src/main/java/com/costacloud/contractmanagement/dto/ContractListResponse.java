@@ -15,7 +15,6 @@ public class ContractListResponse {
     private String title;
     private String client;
     private String description;
-    private String value;
     private String category;
     private ContractStatus status;
     private LocalDate startDate;
@@ -35,7 +34,6 @@ public class ContractListResponse {
         this.title = c.getTitle();
         this.client = c.getClient();
         this.description = c.getDescription();
-        this.value = c.getValue();
         this.category = c.getCategory();
         this.status = c.getStatus();
         this.startDate = c.getStartDate();

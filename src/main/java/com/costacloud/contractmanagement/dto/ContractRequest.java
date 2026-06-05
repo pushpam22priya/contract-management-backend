@@ -23,9 +23,6 @@ public class ContractRequest {
     @Size(max = 500, message = "Description must be 500 characters or less")
     private String description;
 
-    @Size(max = 100, message = "Value must be 100 characters or less")
-    private String value;
-
     @Size(max = 50, message = "Category must be 50 characters or less")
     private String category;
 

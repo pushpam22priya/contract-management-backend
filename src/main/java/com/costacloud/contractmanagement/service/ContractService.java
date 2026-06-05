@@ -75,7 +75,6 @@ public class ContractService {
         contract.setDescription(request.getDescription() != null
                 ? request.getDescription().trim()
                 : "Contract based on " + request.getTemplateName());
-        contract.setValue(request.getValue() != null ? request.getValue() : "N/A");
         contract.setCategory(request.getCategory());
         contract.setStatus(ContractStatus.DRAFT);
         contract.setStartDate(startDate);
@@ -141,7 +140,6 @@ public class ContractService {
         }
         if (request.getClient() != null) contract.setClient(request.getClient().trim());
         if (request.getDescription() != null) contract.setDescription(request.getDescription().trim());
-        if (request.getValue() != null) contract.setValue(request.getValue());
         if (request.getCategory() != null) contract.setCategory(request.getCategory());
         if (request.getStartDate() != null) contract.setStartDate(request.getStartDate());
         if (request.getEndDate() != null) {

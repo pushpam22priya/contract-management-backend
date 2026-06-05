@@ -26,7 +26,6 @@ public class Contract {
     private String title;
     private String client;
     private String description;
-    private String value;
     private String category;
     private ContractStatus status;
 
