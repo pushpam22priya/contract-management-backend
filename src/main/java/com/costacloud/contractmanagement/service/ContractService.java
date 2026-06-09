@@ -166,6 +166,17 @@ public class ContractService {
 
     public void uploadFile(String id, InputStream inputStream, long fileSize, String email) throws Exception {
         Contract contract = findByIdAndOwner(id, email);
+
+        // editing while contract is in an active workflow state
+        ContractStatus s = contract.getStatus();
+        if (s == ContractStatus.IN_REVIEW
+                || s == ContractStatus.IN_APPROVAL
+                || s == ContractStatus.READY_FOR_SIGNATURE) {
+            throw new BadRequestException(
+                    "Contract cannot be edited while it is " + s.name().toLowerCase().replace("_", " ")
+            );
+        }
+
         PushbackInputStream pis = validatePdf(inputStream);
         String objectKey = "contracts/" + id + ".pdf";
         long partSize = fileSize == -1 ? 10 * 1024 * 1024 : -1;

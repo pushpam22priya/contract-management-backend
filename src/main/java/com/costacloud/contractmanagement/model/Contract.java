@@ -13,9 +13,9 @@ import java.util.Map;
 
 @Document(collection = "contracts")
 @CompoundIndexes({
-    @CompoundIndex(name = "idx_createdBy_teamId_status", def = "{'createdBy': 1, 'teamId': 1, 'status': 1}"),
-    @CompoundIndex(name = "idx_title_createdBy",         def = "{'title': 1, 'createdBy': 1}"),
-    @CompoundIndex(name = "idx_fileUploaded_uploadAt",   def = "{'fileUploaded': 1, 'uploadInitiatedAt': 1}")
+        @CompoundIndex(name = "idx_createdBy_teamId_status", def = "{'createdBy': 1, 'teamId': 1, 'status': 1}"),
+        @CompoundIndex(name = "idx_title_createdBy",         def = "{'title': 1, 'createdBy': 1}"),
+        @CompoundIndex(name = "idx_fileUploaded_uploadAt",   def = "{'fileUploaded': 1, 'uploadInitiatedAt': 1}")
 })
 @Data
 public class Contract {
@@ -50,4 +50,12 @@ public class Contract {
     private String createdBy;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
+
+    // ─── Workflow ─────────────────────────────────────────────────
+    private WorkflowMode workflowMode;
+    private List<ReviewerInfo> reviewers;
+    private ReviewStatus reviewStatus;
+    private ApproverInfo approver;
+    private ApprovalStatus approvalStatus;
+    private List<ModificationRequest> modificationRequests;
 }

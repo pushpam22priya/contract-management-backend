@@ -1,7 +1,6 @@
 package com.costacloud.contractmanagement.dto;
 
-import com.costacloud.contractmanagement.model.Contract;
-import com.costacloud.contractmanagement.model.Party;
+import com.costacloud.contractmanagement.model.*;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 
@@ -18,6 +17,11 @@ public class ContractResponse extends ContractListResponse {
     private List<Map<String, Object>> formFields;
     private List<Party> parties;
 
+    // ─── Workflow detail ──────────────────────────────────────────
+    private List<ReviewerInfo> reviewers;
+    private ApproverInfo approver;
+    private List<ModificationRequest> modificationRequests;
+
     public ContractResponse(Contract c) {
         super(c);
         this.templateFileName = c.getTemplateFileName();
@@ -25,5 +29,8 @@ public class ContractResponse extends ContractListResponse {
         this.fieldValues = c.getFieldValues();
         this.formFields = c.getFormFields();
         this.parties = c.getParties();
+        this.reviewers = c.getReviewers();
+        this.approver = c.getApprover();
+        this.modificationRequests = c.getModificationRequests();
     }
 }

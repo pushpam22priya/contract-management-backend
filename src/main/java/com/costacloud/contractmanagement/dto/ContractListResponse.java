@@ -1,7 +1,6 @@
 package com.costacloud.contractmanagement.dto;
 
-import com.costacloud.contractmanagement.model.Contract;
-import com.costacloud.contractmanagement.model.ContractStatus;
+import com.costacloud.contractmanagement.model.*;
 import lombok.Data;
 
 import java.time.LocalDate;
@@ -29,6 +28,11 @@ public class ContractListResponse {
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
+    // ─── Workflow summary ─────────────────────────────────────────
+    private WorkflowMode workflowMode;
+    private ReviewStatus reviewStatus;
+    private ApprovalStatus approvalStatus;
+
     public ContractListResponse(Contract c) {
         this.id = c.getId();
         this.title = c.getTitle();
@@ -48,5 +52,8 @@ public class ContractListResponse {
         this.createdBy = c.getCreatedBy();
         this.createdAt = c.getCreatedAt();
         this.updatedAt = c.getUpdatedAt();
+        this.workflowMode = c.getWorkflowMode();
+        this.reviewStatus = c.getReviewStatus();
+        this.approvalStatus = c.getApprovalStatus();
     }
 }
