@@ -39,7 +39,7 @@ public class ContractWorkflowService {
             handleResubmitAfterReviewerRejection(contract, request, callerEmail);
         } else {
             // REJECTED_BY_APPROVER
-            handleResubmitAfterApproverRejection(contract, callerEmail);
+            handleResubmitAfterApproverRejection(contract, request, callerEmail);
         }
 
         contract.setUpdatedAt(LocalDateTime.now());
@@ -75,6 +75,14 @@ public class ContractWorkflowService {
     }
 
     private void handleResubmitAfterReviewerRejection(Contract contract, SubmitWorkflowRequest request, String callerEmail) {
+
+        // Mode cannot be changed on resubmission
+        if (request.getMode() != null && request.getMode() != contract.getWorkflowMode()) {
+            throw new BadRequestException(
+                    "Workflow mode cannot be changed on resubmission. Original mode: " + contract.getWorkflowMode()
+            );
+        }
+
         List<String> reviewerEmails = request.getReviewerEmails();
 
         if (reviewerEmails == null || reviewerEmails.isEmpty()) {
@@ -106,7 +114,15 @@ public class ContractWorkflowService {
         appendModificationRequest(contract, callerEmail, "contractor", "Resubmitted after reviewer rejection");
     }
 
-    private void handleResubmitAfterApproverRejection(Contract contract, String callerEmail) {
+    private void handleResubmitAfterApproverRejection(Contract contract, SubmitWorkflowRequest request, String callerEmail) {
+
+        // Mode cannot be changed on resubmission
+        if (request.getMode() != null && request.getMode() != contract.getWorkflowMode()) {
+            throw new BadRequestException(
+                    "Workflow mode cannot be changed on resubmission. Original mode: " + contract.getWorkflowMode()
+            );
+        }
+
         ApproverInfo approver = contract.getApprover();
         if (approver == null) {
             throw new BadRequestException("No approver found on this contract");

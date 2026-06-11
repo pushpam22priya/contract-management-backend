@@ -134,6 +134,14 @@ public class ContractController {
         return ResponseEntity.ok().build();
     }
 
+    @Operation(summary = "Get contracts assigned to the current user for review or approval")
+    @SecurityRequirement(name = "bearerAuth")
+    @GetMapping("/inbox")
+    public ResponseEntity<List<ContractResponse>> getInboxContracts() {
+        return ResponseEntity.ok(contractService.getInboxContracts(getEmail()));
+    }
+
+
     private String getEmail() {
         return (String) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
     }

@@ -130,6 +130,15 @@ public class ContractService {
     public ContractResponse updateContract(String id, ContractRequest request, String email) {
         Contract contract = findByIdAndOwner(id, email);
 
+        ContractStatus s = contract.getStatus();
+        if (s == ContractStatus.IN_REVIEW
+                || s == ContractStatus.IN_APPROVAL
+                || s == ContractStatus.READY_FOR_SIGNATURE) {
+            throw new BadRequestException(
+                    "Contract cannot be edited while it is " + s.name().toLowerCase().replace("_", " ")
+            );
+        }
+
         if (request.getTitle() != null) {
             String title = request.getTitle().trim();
             if (!title.equals(contract.getTitle()) &&
@@ -166,17 +175,6 @@ public class ContractService {
 
     public void uploadFile(String id, InputStream inputStream, long fileSize, String email) throws Exception {
         Contract contract = findByIdAndOwner(id, email);
-
-        // editing while contract is in an active workflow state
-        ContractStatus s = contract.getStatus();
-        if (s == ContractStatus.IN_REVIEW
-                || s == ContractStatus.IN_APPROVAL
-                || s == ContractStatus.READY_FOR_SIGNATURE) {
-            throw new BadRequestException(
-                    "Contract cannot be edited while it is " + s.name().toLowerCase().replace("_", " ")
-            );
-        }
-
         PushbackInputStream pis = validatePdf(inputStream);
         String objectKey = "contracts/" + id + ".pdf";
         long partSize = fileSize == -1 ? 10 * 1024 * 1024 : -1;
@@ -196,10 +194,24 @@ public class ContractService {
     // ─── Presigned View URL ───────────────────────────────────────
 
     public String generatePresignedViewUrl(String id, String email) throws Exception {
-        Contract contract = findByIdAndOwner(id, email);
+        Contract contract = contractRepository.findById(id)
+                .orElseThrow(() -> new NotFoundException("Contract not found"));
+
+        boolean isOwner    = contract.getCreatedBy().equals(email);
+        boolean isReviewer = contract.getReviewers() != null &&
+                contract.getReviewers().stream()
+                        .anyMatch(r -> r.getEmail().equalsIgnoreCase(email));
+        boolean isApprover = contract.getApprover() != null &&
+                contract.getApprover().getEmail().equalsIgnoreCase(email);
+
+        if (!isOwner && !isReviewer && !isApprover) {
+            throw new NotFoundException("Contract not found");
+        }
+
         if (!contract.isFileUploaded()) {
             throw new BadRequestException("File not yet uploaded for this contract");
         }
+
         return minioClient.getPresignedObjectUrl(
                 GetPresignedObjectUrlArgs.builder()
                         .method(Method.GET)
@@ -283,6 +295,15 @@ public class ContractService {
                 new Update().set("uploadId", null),
                 Contract.class
         );
+    }
+
+    // ─── Get Inbox Contracts ───────────────────────────
+
+    public List<ContractResponse> getInboxContracts(String email) {
+        return contractRepository.findByAssignedToEmail(email)
+                .stream()
+                .map(ContractResponse::new)
+                .collect(Collectors.toList());
     }
 
     // ─── Cleanup (called by scheduler) ───────────────────────────
