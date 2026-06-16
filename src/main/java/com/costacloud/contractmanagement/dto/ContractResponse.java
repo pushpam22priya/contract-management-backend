@@ -17,10 +17,15 @@ public class ContractResponse extends ContractListResponse {
     private List<Map<String, Object>> formFields;
     private List<Party> parties;
 
-    // ─── Workflow detail ──────────────────────────────────────────
+    // ─── Review/Approval detail ───────────────────────────────────
     private List<ReviewerInfo> reviewers;
     private ApproverInfo approver;
     private List<ModificationRequest> modificationRequests;
+
+    // ─── Signature detail ─────────────────────────────────────────
+    private List<ExternalSigner> externalSigners;
+    private List<InternalSigner> internalSigners;
+    private List<PartyCompletion> partyCompletions;
 
     public ContractResponse(Contract c) {
         super(c);
@@ -32,5 +37,8 @@ public class ContractResponse extends ContractListResponse {
         this.reviewers = c.getReviewers();
         this.approver = c.getApprover();
         this.modificationRequests = c.getModificationRequests();
+        this.externalSigners = c.getExternalSigners();
+        this.internalSigners = c.getInternalSigners();
+        this.partyCompletions = c.getPartyCompletions();
     }
 }

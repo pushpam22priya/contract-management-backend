@@ -6,6 +6,8 @@ public enum ContractStatus {
     IN_APPROVAL,
     READY_FOR_SIGNATURE,
     IN_SIGNATURE,
+    SIGNED_BY_EVERYONE,      // all parties signed, contractor hasn't finalized yet
+    SIGNED,                  // contractor finalized — final PDF sent to all parties
     ACTIVE,
     EXPIRING,
     EXPIRED,

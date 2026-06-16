@@ -55,6 +55,16 @@ public class SecurityConfig {
                                 "/api-docs",
                                 "/webjars/**"
                         ).permitAll()
+
+                        // ─── Public signing endpoints (no JWT — token is the auth) ───
+                        .requestMatchers(HttpMethod.GET,   "/sign-requests/*").permitAll()
+                        .requestMatchers(HttpMethod.GET,   "/sign-requests/*/file-url").permitAll()
+                        .requestMatchers(HttpMethod.POST,  "/sign-requests/*/upload/initiate").permitAll()
+                        .requestMatchers(HttpMethod.GET,   "/sign-requests/*/upload/presign").permitAll()
+                        .requestMatchers(HttpMethod.POST,  "/sign-requests/*/upload/complete").permitAll()
+                        .requestMatchers(HttpMethod.POST,  "/sign-requests/*/upload/abort").permitAll()
+                        .requestMatchers(HttpMethod.PATCH, "/sign-requests/*/viewed").permitAll()
+
                         .requestMatchers(HttpMethod.GET, "/templates/**").authenticated()
                         .requestMatchers(HttpMethod.GET, "/categories/**").authenticated()
                         .requestMatchers("/templates/**").hasRole("ADMIN")

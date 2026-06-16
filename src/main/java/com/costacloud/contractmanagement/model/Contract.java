@@ -51,11 +51,32 @@ public class Contract {
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
-    // ─── Workflow ─────────────────────────────────────────────────
+    // ─── Review / Approval Workflow ───────────────────────────────
     private WorkflowMode workflowMode;
     private List<ReviewerInfo> reviewers;
     private ReviewStatus reviewStatus;
     private ApproverInfo approver;
     private ApprovalStatus approvalStatus;
     private List<ModificationRequest> modificationRequests;
+
+    // ─── Signature Workflow ───────────────────────────────────────
+    private List<ExternalSigner> externalSigners;
+    private List<InternalSigner> internalSigners;
+    private List<PartyCompletion> partyCompletions;
+
+    // "pending_signatures" | "all_completed" | "finalized"
+    private String signatureFlowStatus;
+
+    // Which order is currently active (null when not in signature flow or all done)
+    private Integer currentSigningOrder;
+
+    // Incremented after each signer completes — used for optimistic locking
+    private int version;
+
+    // Display name of the contractor who initiated the signature flow (for emails)
+    private String signatureSenderName;
+
+    // MinIO object keys
+    private String signedPdfKey;    // contracts/{id}_signed.pdf — updated after each signer
+    private String finalPdfKey;     // contracts/{id}_final.pdf  — set on finalization
 }

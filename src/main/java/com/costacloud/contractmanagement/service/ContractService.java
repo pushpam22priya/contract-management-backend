@@ -8,6 +8,7 @@ import com.costacloud.contractmanagement.model.Contract;
 import com.costacloud.contractmanagement.model.ContractStatus;
 import com.costacloud.contractmanagement.repository.ContractRepository;
 import io.minio.*;
+import io.minio.errors.ErrorResponseException;
 import io.minio.http.Method;
 import io.minio.messages.Part;
 import io.minio.GetObjectArgs;
@@ -203,8 +204,11 @@ public class ContractService {
                         .anyMatch(r -> r.getEmail().equalsIgnoreCase(email));
         boolean isApprover = contract.getApprover() != null &&
                 contract.getApprover().getEmail().equalsIgnoreCase(email);
+        boolean isInternalSigner = contract.getInternalSigners() != null &&
+                contract.getInternalSigners().stream()
+                        .anyMatch(s -> s.getEmail().equalsIgnoreCase(email));
 
-        if (!isOwner && !isReviewer && !isApprover) {
+        if (!isOwner && !isReviewer && !isApprover && !isInternalSigner) {
             throw new NotFoundException("Contract not found");
         }
 
@@ -212,14 +216,30 @@ public class ContractService {
             throw new BadRequestException("File not yet uploaded for this contract");
         }
 
+        String signedKey   = "contracts/" + id + "_signed.pdf";
+        String originalKey = "contracts/" + id + ".pdf";
+        String objectKey   = objectExistsInMinio(signedKey) ? signedKey : originalKey;
+
         return minioClient.getPresignedObjectUrl(
                 GetPresignedObjectUrlArgs.builder()
                         .method(Method.GET)
                         .bucket(bucketName)
-                        .object("contracts/" + id + ".pdf")
+                        .object(objectKey)
                         .expiry(15, TimeUnit.MINUTES)
                         .build()
         );
+    }
+
+    private boolean objectExistsInMinio(String objectKey) {
+        try {
+            minioClient.statObject(
+                    StatObjectArgs.builder().bucket(bucketName).object(objectKey).build());
+            return true;
+        } catch (ErrorResponseException e) {
+            return false;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     // ─── Chunked Upload ───────────────────────────────────────────

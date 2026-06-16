@@ -15,4 +15,8 @@ public interface TemplateRepository extends MongoRepository<Template, String> {
     List<Template> findAllExcludingLargeFields();
 
     List<Template> findByFileUploadedFalseAndUploadInitiatedAtBefore(LocalDateTime cutoff);
+
+    boolean existsByName(String name);
+
+    boolean existsByNameAndIdNot(String name, String id);
 }

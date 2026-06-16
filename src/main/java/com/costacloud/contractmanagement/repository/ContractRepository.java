@@ -25,9 +25,12 @@ public interface ContractRepository extends MongoRepository<Contract, String> {
     List<Contract> findByFileUploadedFalseAndUploadInitiatedAtBefore(LocalDateTime cutoff);
 
     @Query(
-            value = "{ '$or': [ { 'reviewers.email': ?0 }, { 'approver.email': ?0 } ] }",
-            sort  = "{ 'createdAt': -1 }"
+            value = "{ '$or': [ " +
+                    "  { 'reviewers.email': ?0 }, " +
+                    "  { 'approver.email': ?0 }, " +
+                    "  { 'internalSigners.email': ?0 } " +
+                    "] }",
+            sort = "{ 'createdAt': -1 }"
     )
     List<Contract> findByAssignedToEmail(String email);
-
 }

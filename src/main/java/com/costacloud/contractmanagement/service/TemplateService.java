@@ -46,8 +46,13 @@ public class TemplateService {
     }
 
     public String createTemplate(TemplateRequest request, String email) {
+        String name = request.getName().trim();
+        if (templateRepository.existsByName(name)) {
+            throw new com.costacloud.contractmanagement.exception.BadRequestException(
+                    "A template with the name \"" + name + "\" already exists");
+        }
         Template template = new Template();
-        template.setName(request.getName());
+        template.setName(name);
         template.setDescription(request.getDescription());
         template.setCategory(request.getCategory());
         template.setFileName(request.getFileName());
@@ -60,6 +65,7 @@ public class TemplateService {
         template.setTimesUsed(0);
         template.setFileUploaded(false);
         template.setHasFormFields(request.getFormFields() != null && !request.getFormFields().isEmpty());
+        validateAllFieldsHaveParty(request.getFormFields());
         templateRepository.save(template);
         return template.getId();
     }
@@ -106,7 +112,12 @@ public class TemplateService {
 
     public TemplateResponse updateTemplate(String id, TemplateRequest request) {
         Template template = findById(id);
-        template.setName(request.getName());
+        String name = request.getName().trim();
+        if (templateRepository.existsByNameAndIdNot(name, id)) {
+            throw new com.costacloud.contractmanagement.exception.BadRequestException(
+                    "A template with the name \"" + name + "\" already exists");
+        }
+        template.setName(name);
         template.setDescription(request.getDescription());
         template.setCategory(request.getCategory());
         template.setFileName(request.getFileName());
@@ -114,6 +125,7 @@ public class TemplateService {
         template.setFormFields(request.getFormFields());
         template.setParties(request.getParties());
         template.setHasFormFields(request.getFormFields() != null && !request.getFormFields().isEmpty());
+        validateAllFieldsHaveParty(request.getFormFields());
         template.setUpdatedAt(LocalDateTime.now());
         templateRepository.save(template);
         return new TemplateResponse(template);
@@ -219,6 +231,19 @@ public class TemplateService {
     private Template findById(String id) {
         return templateRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Template not found"));
+    }
+
+    private void validateAllFieldsHaveParty(List<Template.FormField> fields) {
+        if (fields == null || fields.isEmpty()) return;
+        for (Template.FormField field : fields) {
+            if (field.getAssignedParty() == null || field.getAssignedParty().isBlank()) {
+                String identifier = (field.getLabel() != null && !field.getLabel().isBlank())
+                        ? field.getLabel()
+                        : field.getName();
+                throw new com.costacloud.contractmanagement.exception.BadRequestException(
+                        "Field \"" + identifier + "\" must be assigned to a party before saving the template");
+            }
+        }
     }
 
     private PushbackInputStream validatePdf(InputStream inputStream) throws Exception {

@@ -33,6 +33,12 @@ public class ContractListResponse {
     private ReviewStatus reviewStatus;
     private ApprovalStatus approvalStatus;
 
+    // ─── Signature summary ────────────────────────────────────────
+    private String signatureFlowStatus;
+    private Integer currentSigningOrder;
+
+    protected ContractListResponse() {}
+
     public ContractListResponse(Contract c) {
         this.id = c.getId();
         this.title = c.getTitle();
@@ -55,5 +61,7 @@ public class ContractListResponse {
         this.workflowMode = c.getWorkflowMode();
         this.reviewStatus = c.getReviewStatus();
         this.approvalStatus = c.getApprovalStatus();
+        this.signatureFlowStatus = c.getSignatureFlowStatus();
+        this.currentSigningOrder = c.getCurrentSigningOrder();
     }
 }
