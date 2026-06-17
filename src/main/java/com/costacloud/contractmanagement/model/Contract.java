@@ -73,6 +73,9 @@ public class Contract {
     // Incremented after each signer completes — used for optimistic locking
     private int version;
 
+    // Incremented each time a new signing round starts (re-share after all-completed)
+    private int signingRound = 1;
+
     // Display name of the contractor who initiated the signature flow (for emails)
     private String signatureSenderName;
 

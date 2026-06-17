@@ -14,6 +14,9 @@ public class ExternalSigner {
     // Unique per signer — no two signers in any submission share an order
     private int order;
 
+    // Signing round this signer belongs to (1 = first submission, 2 = re-share after all-completed, ...)
+    private int signingRound;
+
     // Unique URL-safe token — forms the public signing link /sign/{token}
     private String token;
 

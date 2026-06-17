@@ -163,7 +163,7 @@ public class ContractService {
         }
         if (request.getXfdfData() != null) contract.setXfdfData(request.getXfdfData());
         if (request.getFieldValues() != null) contract.setFieldValues(request.getFieldValues());
-        if (request.getFormFields() != null) contract.setFormFields(request.getFormFields());
+        if (request.getFormFields() != null) mergeFormFieldsSafe(contract, request.getFormFields());
         if (request.getParties() != null) contract.setParties(request.getParties());
         if (request.getTeamId() != null) contract.setTeamId(request.getTeamId());
 
@@ -341,6 +341,41 @@ public class ContractService {
             throw new NotFoundException("Contract not found");
         }
         return contract;
+    }
+
+    // Merges incoming formFields from the frontend with the authoritative stored fields,
+    // preserving party assignment metadata that Apryse's exportFormFields() strips out.
+    private void mergeFormFieldsSafe(Contract contract, List<Map<String, Object>> incoming) {
+        List<Map<String, Object>> existing = contract.getFormFields();
+        if (existing == null || existing.isEmpty()) {
+            contract.setFormFields(incoming);
+            return;
+        }
+
+        Map<String, Map<String, Object>> existingByName = new HashMap<>();
+        for (Map<String, Object> f : existing) {
+            Object key = f.get("fieldName") != null ? f.get("fieldName") : f.get("name");
+            if (key != null) existingByName.put(key.toString(), f);
+        }
+
+        List<String> protectedKeys = List.of(
+                "assignedParty", "partyLabel", "partyColor", "profileKey", "lockedBy");
+
+        List<Map<String, Object>> merged = new ArrayList<>();
+        for (Map<String, Object> inc : incoming) {
+            Object key = inc.get("fieldName") != null ? inc.get("fieldName") : inc.get("name");
+            if (key != null && existingByName.containsKey(key.toString())) {
+                Map<String, Object> stored = existingByName.get(key.toString());
+                Map<String, Object> m = new HashMap<>(inc);
+                for (String pk : protectedKeys) {
+                    if (stored.containsKey(pk)) m.put(pk, stored.get(pk));
+                }
+                merged.add(m);
+            } else {
+                merged.add(inc);
+            }
+        }
+        contract.setFormFields(merged);
     }
 
     private PushbackInputStream validatePdf(InputStream inputStream) throws Exception {

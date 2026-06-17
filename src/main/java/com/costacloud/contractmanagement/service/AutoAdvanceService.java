@@ -12,6 +12,7 @@ import java.time.LocalDateTime;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 @Service
 public class AutoAdvanceService {
@@ -45,8 +46,16 @@ public class AutoAdvanceService {
         if ("all_completed".equals(flowStatus) || "finalized".equals(flowStatus)) return;
         if (contract.getCurrentSigningOrder() == null) return;
 
-        List<ExternalSigner> externals = orEmpty(contract.getExternalSigners());
-        List<InternalSigner> internals = orEmpty(contract.getInternalSigners());
+        // Only process signers that belong to the current signing round.
+        // Old documents without signingRound (value 0) are treated as round 1.
+        int contractRound = roundOf(contract.getSigningRound());
+
+        List<ExternalSigner> externals = orEmpty(contract.getExternalSigners()).stream()
+                .filter(s -> roundOf(s.getSigningRound()) == contractRound)
+                .collect(Collectors.toList());
+        List<InternalSigner> internals = orEmpty(contract.getInternalSigners()).stream()
+                .filter(s -> roundOf(s.getSigningRound()) == contractRound)
+                .collect(Collectors.toList());
 
         if (externals.isEmpty() && internals.isEmpty()) return;
 
@@ -170,6 +179,8 @@ public class AutoAdvanceService {
             log.info("Contract {} — advanced to order {}", contractId, advanceTo);
         }
     }
+
+    private static int roundOf(int r) { return r <= 0 ? 1 : r; }
 
     private String resolvePartyColor(Contract contract, String partyId) {
         if (contract.getParties() == null || partyId == null) return "#0e7c6b";

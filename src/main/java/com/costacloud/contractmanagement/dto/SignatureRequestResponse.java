@@ -18,7 +18,9 @@ public class SignatureRequestResponse {
     private String status;
     private LocalDateTime expiresAt;
 
-    private List<String> assignedParty;
+    // Single string — frontend wraps this in an array: editableParties = [assignedParty]
+    // Keeping it as String (not List) matches the expected frontend shape.
+    private String assignedParty;
     private List<String> assignedPartyLabel;
 
     private List<Map<String, Object>> formFields;

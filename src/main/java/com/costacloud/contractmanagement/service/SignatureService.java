@@ -84,11 +84,23 @@ public class SignatureService {
         ContractStatus status = contract.getStatus();
         if (status != ContractStatus.READY_FOR_SIGNATURE && status != ContractStatus.IN_SIGNATURE) {
             if (status == ContractStatus.SIGNED_BY_EVERYONE || status == ContractStatus.SIGNED) {
+                // Allow re-share only when there are parties that still have no signer assigned
+                Set<String> assignedPartyIds = new HashSet<>();
+                orEmpty(contract.getExternalSigners())
+                        .forEach(s -> { if (s.getPartyId() != null) assignedPartyIds.add(s.getPartyId()); });
+                orEmpty(contract.getInternalSigners())
+                        .forEach(s -> { if (s.getPartyId() != null) assignedPartyIds.add(s.getPartyId()); });
+                boolean hasUnassignedParties = orEmpty(contract.getParties()).stream()
+                        .anyMatch(p -> !assignedPartyIds.contains(p.getId()));
+                if (!hasUnassignedParties) {
+                    throw new BadRequestException(
+                            "Cannot add signers — the contract has already completed the signing workflow");
+                }
+                // Has unassigned parties — fall through and start a new signing round
+            } else {
                 throw new BadRequestException(
-                        "Cannot add signers — the contract has already completed the signing workflow");
+                        "Contract must be ready for signature or already in signature workflow. Current status: " + status);
             }
-            throw new BadRequestException(
-                    "Contract must be ready for signature or already in signature workflow. Current status: " + status);
         }
 
         if (!contract.isFileUploaded()) {
@@ -142,15 +154,32 @@ public class SignatureService {
         boolean isReShare = !existingExternal.isEmpty() || !existingInternal.isEmpty();
 
         int startingOrder;
+        // appendOnly = true means new signers are being appended to an active in-progress chain.
+        // They must ALL start as "pending" and currentSigningOrder must not be touched —
+        // AutoAdvanceService will unlock them naturally when the chain reaches their order.
+        boolean appendOnly = false;
+
+        // activeRound is the round the new signers will belong to.
+        // Old MongoDB documents that lack signingRound will deserialize to 0 — treat 0 as round 1.
+        int activeRound = Math.max(1, contract.getSigningRound());
 
         if (isReShare) {
-            int maxExistingOrder = existingExternal.stream().mapToInt(ExternalSigner::getOrder).max().orElse(0);
-            maxExistingOrder = Math.max(maxExistingOrder,
-                    existingInternal.stream().mapToInt(InternalSigner::getOrder).max().orElse(0));
+            // For re-share, only look at signers from the current active round
+            int currentRound = activeRound;
+            List<ExternalSigner> roundExternals = existingExternal.stream()
+                    .filter(s -> roundOf(s.getSigningRound()) == currentRound)
+                    .collect(Collectors.toList());
+            List<InternalSigner> roundInternals = existingInternal.stream()
+                    .filter(s -> roundOf(s.getSigningRound()) == currentRound)
+                    .collect(Collectors.toList());
 
-            boolean hasInProgress = existingExternal.stream()
+            int maxExistingOrder = roundExternals.stream().mapToInt(ExternalSigner::getOrder).max().orElse(0);
+            maxExistingOrder = Math.max(maxExistingOrder,
+                    roundInternals.stream().mapToInt(InternalSigner::getOrder).max().orElse(0));
+
+            boolean hasInProgress = roundExternals.stream()
                     .anyMatch(s -> !"completed".equals(s.getStatus()))
-                    || existingInternal.stream()
+                    || roundInternals.stream()
                     .anyMatch(s -> !"completed".equals(s.getStatus()));
 
             int newMinOrder = assignments.stream().mapToInt(SignerAssignmentDto::getOrder).min().orElse(1);
@@ -163,12 +192,16 @@ public class SignatureService {
                                     + " because signers at orders 1–" + maxExistingOrder + " are still in progress.");
                 }
                 startingOrder = newMinOrder;
+                appendOnly = true;  // existing chain is active — new signers wait, never unlock now
             } else {
+                // All signers in the current round have completed — start a new round
                 if (newMinOrder != 1) {
                     throw new BadRequestException(
                             "All previous signers have completed. "
                                     + "New signers must start at order 1 so that auto-advance can unlock them.");
                 }
+                activeRound = activeRound + 1;  // advance to the next signing round
+                contract.setSigningRound(activeRound);
                 startingOrder = 1;
             }
         } else {
@@ -177,6 +210,8 @@ public class SignatureService {
                 throw new BadRequestException(
                         "The signing chain must start at order 1. Lowest order provided: " + newMinOrder);
             }
+            contract.setSigningRound(1);  // always round 1 for a fresh submission
+            activeRound = 1;
             startingOrder = 1;
         }
 
@@ -189,7 +224,8 @@ public class SignatureService {
         List<PartyCompletion> newCompletions = new ArrayList<>(orEmpty(contract.getPartyCompletions()));
 
         for (SignerAssignmentDto a : assignments) {
-            boolean unlocked = (a.getOrder() == startingOrder);
+            // appendOnly: existing chain is active — new signer is never unlocked immediately
+            boolean unlocked = !appendOnly && (a.getOrder() == startingOrder);
             String signerStatus = unlocked ? "unlocked" : "pending";
 
             if ("external".equals(a.getType())) {
@@ -199,6 +235,7 @@ public class SignatureService {
                 ext.setPartyId(a.getPartyId());
                 ext.setPartyLabel(a.getPartyLabel());
                 ext.setOrder(a.getOrder());
+                ext.setSigningRound(activeRound);
                 ext.setToken(generateToken());
                 ext.setStatus(signerStatus);
                 ext.setSentAt(now);
@@ -213,6 +250,7 @@ public class SignatureService {
                 intSigner.setPartyId(a.getPartyId());
                 intSigner.setPartyLabel(a.getPartyLabel());
                 intSigner.setOrder(a.getOrder());
+                intSigner.setSigningRound(activeRound);
                 intSigner.setStatus(signerStatus);
                 intSigner.setAssignedAt(now);
                 if (unlocked) intSigner.setUnlockedAt(now);
@@ -235,7 +273,11 @@ public class SignatureService {
         contract.setPartyCompletions(newCompletions);
         contract.setStatus(ContractStatus.IN_SIGNATURE);
         contract.setSignatureFlowStatus("pending_signatures");
-        contract.setCurrentSigningOrder(startingOrder);
+        // appendOnly: keep the existing currentSigningOrder intact so auto-advance
+        // continues from where it left off and reaches the new signer in sequence
+        if (!appendOnly) {
+            contract.setCurrentSigningOrder(startingOrder);
+        }
         contract.setSignatureSenderName(senderName);
         contract.setUpdatedAt(now);
 
@@ -303,7 +345,10 @@ public class SignatureService {
         response.setSignerName(sr.getSignerName());
         response.setStatus(sr.getStatus());
         response.setExpiresAt(sr.getExpiresAt());
-        response.setAssignedParty(sr.getAssignedParty());
+        // Frontend expects a single String, not a List — extracts [0] from storage
+        String assignedPartyId = (sr.getAssignedParty() != null && !sr.getAssignedParty().isEmpty())
+                ? sr.getAssignedParty().get(0) : null;
+        response.setAssignedParty(assignedPartyId);
         response.setAssignedPartyLabel(sr.getAssignedPartyLabel());
         response.setFormFields(contract.getFormFields());
         response.setXfdfData(contract.getXfdfData());
@@ -752,20 +797,26 @@ public class SignatureService {
             return;
         }
 
+        // Index existing fields by both key variants Apryse may use
         Map<String, Map<String, Object>> metaByName = new HashMap<>();
         for (Map<String, Object> f : existing) {
-            Object name = f.get("fieldName");
-            if (name != null) metaByName.put(name.toString(), f);
+            Object key = f.get("fieldName") != null ? f.get("fieldName") : f.get("name");
+            if (key != null) metaByName.put(key.toString(), f);
         }
+
+        // Party-owned fields that must never be overwritten by a signer submission
+        List<String> protectedKeys = List.of(
+                "assignedParty", "partyLabel", "partyColor", "profileKey", "lockedBy");
 
         List<Map<String, Object>> merged = new ArrayList<>();
         for (Map<String, Object> sf : signerFields) {
-            Object name = sf.get("fieldName");
-            if (name != null && metaByName.containsKey(name.toString())) {
-                Map<String, Object> auth = metaByName.get(name.toString());
+            Object key = sf.get("fieldName") != null ? sf.get("fieldName") : sf.get("name");
+            if (key != null && metaByName.containsKey(key.toString())) {
+                Map<String, Object> authoritative = metaByName.get(key.toString());
                 Map<String, Object> m = new HashMap<>(sf);
-                if (auth.containsKey("assignedParty")) m.put("assignedParty", auth.get("assignedParty"));
-                if (auth.containsKey("lockedBy"))      m.put("lockedBy", auth.get("lockedBy"));
+                for (String pk : protectedKeys) {
+                    if (authoritative.containsKey(pk)) m.put(pk, authoritative.get(pk));
+                }
                 merged.add(m);
             } else {
                 merged.add(sf);
@@ -812,6 +863,9 @@ public class SignatureService {
             return false;
         }
     }
+
+    // Treats 0 as round 1 — handles legacy MongoDB documents that pre-date the signingRound field
+    private static int roundOf(int r) { return r <= 0 ? 1 : r; }
 
     private String resolvePartyColor(Contract contract, String partyId) {
         if (contract.getParties() == null || partyId == null) return "#0e7c6b";
