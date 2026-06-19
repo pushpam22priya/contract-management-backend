@@ -154,64 +154,49 @@ public class SignatureService {
         boolean isReShare = !existingExternal.isEmpty() || !existingInternal.isEmpty();
 
         int startingOrder;
-        // appendOnly = true means new signers are being appended to an active in-progress chain.
-        // They must ALL start as "pending" and currentSigningOrder must not be touched —
-        // AutoAdvanceService will unlock them naturally when the chain reaches their order.
+        // appendOnly = true means new signers are appended to an active in-progress chain.
+        // They stay "pending" and currentSigningOrder is untouched —
+        // AutoAdvanceService unlocks them naturally when the chain reaches their order.
         boolean appendOnly = false;
 
-        // activeRound is the round the new signers will belong to.
-        // Old MongoDB documents that lack signingRound will deserialize to 0 — treat 0 as round 1.
-        int activeRound = Math.max(1, contract.getSigningRound());
-
         if (isReShare) {
-            // For re-share, only look at signers from the current active round
-            int currentRound = activeRound;
-            List<ExternalSigner> roundExternals = existingExternal.stream()
-                    .filter(s -> roundOf(s.getSigningRound()) == currentRound)
-                    .collect(Collectors.toList());
-            List<InternalSigner> roundInternals = existingInternal.stream()
-                    .filter(s -> roundOf(s.getSigningRound()) == currentRound)
-                    .collect(Collectors.toList());
-
-            int maxExistingOrder = roundExternals.stream().mapToInt(ExternalSigner::getOrder).max().orElse(0);
+            // Orders are globally unique across the entire contract — no round concept.
+            // New signers must always continue the chain at an order above the current maximum.
+            int maxExistingOrder = existingExternal.stream().mapToInt(ExternalSigner::getOrder).max().orElse(0);
             maxExistingOrder = Math.max(maxExistingOrder,
-                    roundInternals.stream().mapToInt(InternalSigner::getOrder).max().orElse(0));
+                    existingInternal.stream().mapToInt(InternalSigner::getOrder).max().orElse(0));
 
-            boolean hasInProgress = roundExternals.stream()
+            boolean hasInProgress = existingExternal.stream()
                     .anyMatch(s -> !"completed".equals(s.getStatus()))
-                    || roundInternals.stream()
+                    || existingInternal.stream()
                     .anyMatch(s -> !"completed".equals(s.getStatus()));
 
             int newMinOrder = assignments.stream().mapToInt(SignerAssignmentDto::getOrder).min().orElse(1);
 
-            if (hasInProgress) {
-                if (newMinOrder <= maxExistingOrder) {
+            if (newMinOrder <= maxExistingOrder) {
+                if (hasInProgress) {
                     throw new BadRequestException(
                             "Order " + newMinOrder + " conflicts with an in-progress signer. "
                                     + "New signers must have order greater than " + maxExistingOrder
                                     + " because signers at orders 1–" + maxExistingOrder + " are still in progress.");
-                }
-                startingOrder = newMinOrder;
-                appendOnly = true;  // existing chain is active — new signers wait, never unlock now
-            } else {
-                // All signers in the current round have completed — start a new round
-                if (newMinOrder != 1) {
+                } else {
                     throw new BadRequestException(
-                            "All previous signers have completed. "
-                                    + "New signers must start at order 1 so that auto-advance can unlock them.");
+                            "Order " + newMinOrder + " is already used. "
+                                    + "New signers must continue the chain at an order greater than " + maxExistingOrder + ".");
                 }
-                activeRound = activeRound + 1;  // advance to the next signing round
-                contract.setSigningRound(activeRound);
-                startingOrder = 1;
             }
+
+            startingOrder = newMinOrder;
+            if (hasInProgress) {
+                appendOnly = true;  // chain is active — new signers wait for auto-advance to reach them
+            }
+            // if all completed, appendOnly stays false → signer at startingOrder unlocks immediately
         } else {
             int newMinOrder = assignments.stream().mapToInt(SignerAssignmentDto::getOrder).min().orElse(1);
             if (newMinOrder != 1) {
                 throw new BadRequestException(
                         "The signing chain must start at order 1. Lowest order provided: " + newMinOrder);
             }
-            contract.setSigningRound(1);  // always round 1 for a fresh submission
-            activeRound = 1;
             startingOrder = 1;
         }
 
@@ -235,7 +220,6 @@ public class SignatureService {
                 ext.setPartyId(a.getPartyId());
                 ext.setPartyLabel(a.getPartyLabel());
                 ext.setOrder(a.getOrder());
-                ext.setSigningRound(activeRound);
                 ext.setToken(generateToken());
                 ext.setStatus(signerStatus);
                 ext.setSentAt(now);
@@ -250,7 +234,6 @@ public class SignatureService {
                 intSigner.setPartyId(a.getPartyId());
                 intSigner.setPartyLabel(a.getPartyLabel());
                 intSigner.setOrder(a.getOrder());
-                intSigner.setSigningRound(activeRound);
                 intSigner.setStatus(signerStatus);
                 intSigner.setAssignedAt(now);
                 if (unlocked) intSigner.setUnlockedAt(now);
