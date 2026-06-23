@@ -82,4 +82,15 @@ public class Contract {
     // MinIO object keys
     private String signedPdfKey;    // contracts/{id}_signed.pdf — updated after each signer
     private String finalPdfKey;     // contracts/{id}_final.pdf  — set on finalization
+
+    // ─── Termination ──────────────────────────────────────────────
+    private LocalDateTime terminatedAt;
+    private String terminatedBy;
+
+    // ─── Renewal ──────────────────────────────────────────────────
+    private String renewalStatus;       // "in_progress" | null
+    private String renewedContractId;   // ID of the renewal draft created from this contract
+    private String renewedFromId;       // ID of the original contract this was renewed from
+    private String renewalStartDate;    // ISO date — start date of the pending renewal
+    private String renewalNotes;        // optional notes recorded at renewal creation
 }

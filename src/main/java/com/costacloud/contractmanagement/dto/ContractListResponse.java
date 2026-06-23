@@ -37,6 +37,17 @@ public class ContractListResponse {
     private String signatureFlowStatus;
     private Integer currentSigningOrder;
 
+    // ─── Termination ──────────────────────────────────────────────
+    private LocalDateTime terminatedAt;
+    private String terminatedBy;
+
+    // ─── Renewal ──────────────────────────────────────────────────
+    private String renewalStatus;
+    private String renewedContractId;
+    private String renewedFromId;
+    private String renewalStartDate;
+    private String renewalNotes;
+
     protected ContractListResponse() {}
 
     public ContractListResponse(Contract c) {
@@ -63,5 +74,31 @@ public class ContractListResponse {
         this.approvalStatus = c.getApprovalStatus();
         this.signatureFlowStatus = c.getSignatureFlowStatus();
         this.currentSigningOrder = c.getCurrentSigningOrder();
+        this.terminatedAt = c.getTerminatedAt();
+        this.terminatedBy = c.getTerminatedBy();
+        this.renewalStatus = c.getRenewalStatus();
+        this.renewedContractId = c.getRenewedContractId();
+        this.renewedFromId = c.getRenewedFromId();
+        this.renewalStartDate = c.getRenewalStartDate();
+        this.renewalNotes = c.getRenewalNotes();
+
+        // Recompute status at read time for post-finalization contracts.
+        // The DB stores SIGNED; the response must reflect the actual date-driven state.
+        // All other statuses (DRAFT, IN_REVIEW, IN_SIGNATURE, TERMINATED, etc.) pass through unchanged.
+        if (this.status == ContractStatus.SIGNED
+                || this.status == ContractStatus.ACTIVE
+                || this.status == ContractStatus.EXPIRING
+                || this.status == ContractStatus.EXPIRED) {
+            if (this.endDate != null) {
+                if (this.endDate.isBefore(LocalDate.now())) {
+                    this.status = ContractStatus.EXPIRED;
+                } else if (this.expiresInDays <= 30) {
+                    this.status = ContractStatus.EXPIRING;
+                } else if (this.startDate != null && !this.startDate.isAfter(LocalDate.now())) {
+                    this.status = ContractStatus.ACTIVE;
+                }
+                // startDate is in the future → contract is finalized but not yet started → stays SIGNED
+            }
+        }
     }
 }

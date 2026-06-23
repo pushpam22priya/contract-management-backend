@@ -141,6 +141,13 @@ public class ContractController {
         return ResponseEntity.ok(contractService.getInboxContracts(getEmail()));
     }
 
+    @Operation(summary = "Terminate an expired contract — irreversible")
+    @SecurityRequirement(name = "bearerAuth")
+    @PostMapping("/{id}/terminate")
+    public ResponseEntity<TerminationResponse> terminateContract(@PathVariable String id) {
+        return ResponseEntity.ok(contractService.terminateContract(id, getEmail()));
+    }
+
 
     private String getEmail() {
         return (String) SecurityContextHolder.getContext().getAuthentication().getPrincipal();

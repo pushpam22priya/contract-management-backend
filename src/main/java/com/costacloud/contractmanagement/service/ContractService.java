@@ -3,6 +3,7 @@ package com.costacloud.contractmanagement.service;
 import com.costacloud.contractmanagement.config.CustomMinioClient;
 import com.costacloud.contractmanagement.dto.*;
 import com.costacloud.contractmanagement.exception.BadRequestException;
+import com.costacloud.contractmanagement.exception.ConflictException;
 import com.costacloud.contractmanagement.exception.NotFoundException;
 import com.costacloud.contractmanagement.model.Contract;
 import com.costacloud.contractmanagement.model.ContractStatus;
@@ -24,6 +25,7 @@ import java.io.InputStream;
 import java.io.PushbackInputStream;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -326,6 +328,42 @@ public class ContractService {
                 .collect(Collectors.toList());
     }
 
+    // ─── Terminate Contract ───────────────────────────────────────
+
+    public TerminationResponse terminateContract(String id, String email) {
+        Contract contract = findByIdAndOwner(id, email);
+
+        // Idempotent — already terminated
+        if (contract.getStatus() == ContractStatus.TERMINATED) {
+            return new TerminationResponse(true, true);
+        }
+
+        // Only EXPIRED contracts can be terminated
+        String effectiveStatus = computeEffectiveStatusLabel(contract);
+        if (!"EXPIRED".equals(effectiveStatus)) {
+            throw new BadRequestException(
+                "Cannot terminate a contract with status \"" + effectiveStatus + "\". Only expired contracts can be terminated."
+            );
+        }
+
+        // Block if a renewal is in flight
+        if ("in_progress".equals(contract.getRenewalStatus())) {
+            throw new ConflictException(
+                "Cannot terminate a contract that has an active renewal in progress. Cancel or complete the renewal first."
+            );
+        }
+
+        contract.setStatus(ContractStatus.TERMINATED);
+        contract.setTerminatedAt(LocalDateTime.now());
+        contract.setTerminatedBy(email);           // JWT email — authoritative over request body
+        contract.setRenewalStatus(null);           // clear renewal linkage per spec
+        contract.setRenewedContractId(null);
+        contract.setUpdatedAt(LocalDateTime.now());
+        contractRepository.save(contract);
+
+        return new TerminationResponse(true, false);
+    }
+
     // ─── Cleanup (called by scheduler) ───────────────────────────
 
     public List<Contract> findOrphanedUploads(LocalDateTime cutoff) {
@@ -376,6 +414,22 @@ public class ContractService {
             }
         }
         contract.setFormFields(merged);
+    }
+
+    // Mirrors ContractListResponse status computation — used to validate termination eligibility.
+    // Returns the computed status label as a string so the error message shows what the user sees.
+    private String computeEffectiveStatusLabel(Contract c) {
+        ContractStatus s = c.getStatus();
+        if (s != ContractStatus.SIGNED && s != ContractStatus.ACTIVE
+                && s != ContractStatus.EXPIRING && s != ContractStatus.EXPIRED) {
+            return s.name();
+        }
+        if (c.getEndDate() == null) return "SIGNED";
+        if (c.getEndDate().isBefore(LocalDate.now())) return "EXPIRED";
+        long days = ChronoUnit.DAYS.between(LocalDate.now(), c.getEndDate());
+        if (days <= 30) return "EXPIRING";
+        if (c.getStartDate() != null && !c.getStartDate().isAfter(LocalDate.now())) return "ACTIVE";
+        return "SIGNED";
     }
 
     private PushbackInputStream validatePdf(InputStream inputStream) throws Exception {
