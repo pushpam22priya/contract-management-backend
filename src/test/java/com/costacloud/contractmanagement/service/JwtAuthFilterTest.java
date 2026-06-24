@@ -2,8 +2,6 @@ package com.costacloud.contractmanagement.service;
 
 import com.costacloud.contractmanagement.filter.JwtAuthFilter;
 import jakarta.servlet.FilterChain;
-import jakarta.servlet.ServletRequest;
-import jakarta.servlet.ServletResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.junit.jupiter.api.AfterEach;
@@ -25,7 +23,8 @@ import static org.mockito.Mockito.*;
 @DisplayName("JwtAuthFilter - doFilterInternal")
 class JwtAuthFilterTest {
 
-    @Mock JwtService jwtService;
+    @Mock JwtService            jwtService;
+    @Mock TokenBlacklistService tokenBlacklistService;
 
     @InjectMocks JwtAuthFilter jwtAuthFilter;
 
@@ -33,9 +32,9 @@ class JwtAuthFilterTest {
     @Mock HttpServletResponse response;
     @Mock FilterChain         filterChain;
 
-    private static final String VALID_TOKEN  = "valid.jwt.token";
-    private static final String USER_EMAIL   = "user@test.com";
-    private static final String USER_ROLE    = "USER";
+    private static final String VALID_TOKEN = "valid.jwt.token";
+    private static final String USER_EMAIL  = "user@test.com";
+    private static final String USER_ROLE   = "USER";
 
     @AfterEach
     void clearSecurityContext() {
@@ -92,17 +91,18 @@ class JwtAuthFilterTest {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // GROUP 2 — Valid Bearer token
+    // GROUP 2 — Valid and non-revoked Bearer token
     // ─────────────────────────────────────────────────────────────────────────
 
     @Nested
-    @DisplayName("Valid Bearer token")
+    @DisplayName("Valid and non-revoked Bearer token")
     class ValidToken {
 
         @BeforeEach
         void stubValidToken() {
             when(request.getHeader("Authorization")).thenReturn("Bearer " + VALID_TOKEN);
             when(jwtService.isTokenValid(VALID_TOKEN)).thenReturn(true);
+            when(tokenBlacklistService.isRevoked(VALID_TOKEN)).thenReturn(false);
             when(jwtService.extractEmail(VALID_TOKEN)).thenReturn(USER_EMAIL);
             when(jwtService.extractRole(VALID_TOKEN)).thenReturn(USER_ROLE);
         }
@@ -124,7 +124,7 @@ class JwtAuthFilterTest {
 
             Authentication auth = SecurityContextHolder.getContext().getAuthentication();
             assertTrue(auth.getAuthorities().stream()
-                .anyMatch(a -> a.getAuthority().equals("ROLE_USER")));
+                    .anyMatch(a -> a.getAuthority().equals("ROLE_USER")));
         }
 
         @Test
@@ -136,7 +136,7 @@ class JwtAuthFilterTest {
 
             Authentication auth = SecurityContextHolder.getContext().getAuthentication();
             assertTrue(auth.getAuthorities().stream()
-                .anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN")));
+                    .anyMatch(a -> a.getAuthority().equals("ROLE_ADMIN")));
         }
 
         @Test
@@ -149,7 +149,7 @@ class JwtAuthFilterTest {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // GROUP 3 — Invalid / expired token
+    // GROUP 3 — Invalid or expired token
     // ─────────────────────────────────────────────────────────────────────────
 
     @Nested
@@ -184,6 +184,62 @@ class JwtAuthFilterTest {
             jwtAuthFilter.doFilter(request, response, filterChain);
 
             verify(jwtService, never()).extractEmail(any());
+        }
+
+        @Test
+        @DisplayName("never checks the blacklist when the token signature is already invalid")
+        void shouldNotCheckBlacklist_whenTokenInvalid() throws Exception {
+            jwtAuthFilter.doFilter(request, response, filterChain);
+
+            verify(tokenBlacklistService, never()).isRevoked(any());
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // GROUP 4 — Revoked token (valid signature but in blacklist)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("Revoked Bearer token")
+    class RevokedToken {
+
+        @BeforeEach
+        void stubRevokedToken() {
+            when(request.getHeader("Authorization")).thenReturn("Bearer " + VALID_TOKEN);
+            when(jwtService.isTokenValid(VALID_TOKEN)).thenReturn(true);
+            when(tokenBlacklistService.isRevoked(VALID_TOKEN)).thenReturn(true);
+        }
+
+        @Test
+        @DisplayName("does not set SecurityContext when token has been revoked")
+        void shouldNotSetSecurityContext_whenTokenRevoked() throws Exception {
+            jwtAuthFilter.doFilter(request, response, filterChain);
+
+            assertNull(SecurityContextHolder.getContext().getAuthentication());
+        }
+
+        @Test
+        @DisplayName("still passes through to the filter chain when token is revoked")
+        void shouldCallFilterChain_whenTokenRevoked() throws Exception {
+            jwtAuthFilter.doFilter(request, response, filterChain);
+
+            verify(filterChain, times(1)).doFilter(request, response);
+        }
+
+        @Test
+        @DisplayName("never calls extractEmail when the token is revoked")
+        void shouldNotExtractEmail_whenTokenRevoked() throws Exception {
+            jwtAuthFilter.doFilter(request, response, filterChain);
+
+            verify(jwtService, never()).extractEmail(any());
+        }
+
+        @Test
+        @DisplayName("never calls extractRole when the token is revoked")
+        void shouldNotExtractRole_whenTokenRevoked() throws Exception {
+            jwtAuthFilter.doFilter(request, response, filterChain);
+
+            verify(jwtService, never()).extractRole(any());
         }
     }
 }

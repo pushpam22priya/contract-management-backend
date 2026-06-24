@@ -1,6 +1,7 @@
 package com.costacloud.contractmanagement.filter;
 
 import com.costacloud.contractmanagement.service.JwtService;
+import com.costacloud.contractmanagement.service.TokenBlacklistService;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -18,9 +19,12 @@ import java.util.List;
 public class JwtAuthFilter extends OncePerRequestFilter {
 
     private final JwtService jwtService;
+    private final TokenBlacklistService tokenBlacklistService;
 
-    public JwtAuthFilter(JwtService jwtService) {
+    public JwtAuthFilter(JwtService jwtService,
+                         TokenBlacklistService tokenBlacklistService) {  // ← add
         this.jwtService = jwtService;
+        this.tokenBlacklistService = tokenBlacklistService;
     }
 
     @Override
@@ -38,14 +42,14 @@ public class JwtAuthFilter extends OncePerRequestFilter {
 
         String token = authHeader.substring(7);   // remove "Bearer " prefix
 
-        if (jwtService.isTokenValid(token)) {
+        if (jwtService.isTokenValid(token) && !tokenBlacklistService.isRevoked(token)) {
             String email = jwtService.extractEmail(token);
             String role  = jwtService.extractRole(token);
             UsernamePasswordAuthenticationToken authentication =
                     new UsernamePasswordAuthenticationToken(
                             email,
                             null,
-                            List.of(new SimpleGrantedAuthority("ROLE_" + role))  // ← was List.of()
+                            List.of(new SimpleGrantedAuthority("ROLE_" + role))
                     );
             SecurityContextHolder.getContext().setAuthentication(authentication);
         }

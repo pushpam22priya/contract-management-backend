@@ -1,8 +1,8 @@
 # Contract API Documentation
 
-**Version:** 1.1.0  
+**Version:** 1.3.0  
 **Base URL:** `http://localhost:8080`  
-**Last Updated:** 2026-06-04
+**Last Updated:** 2026-06-22
 
 ---
 
@@ -27,10 +27,12 @@
    - 5.8 [Get Presigned Part URL](#58-get-presigned-part-url)
    - 5.9 [Complete Chunked Upload](#59-complete-chunked-upload)
    - 5.10 [Abort Chunked Upload](#510-abort-chunked-upload)
+   - 5.11 [Terminate Contract](#511-terminate-contract)
 6. [End-to-End Flows](#6-end-to-end-flows)
    - 6.1 [Metadata Only](#61-metadata-only)
    - 6.2 [Small File — Single-Shot Upload](#62-small-file--single-shot-upload)
    - 6.3 [Large File — Chunked Upload](#63-large-file--chunked-upload)
+   - 6.4 [Terminate a Contract](#64-terminate-a-contract)
 7. [Business Rules](#7-business-rules)
 8. [Automatic Cleanup](#8-automatic-cleanup)
 9. [Endpoint Summary](#9-endpoint-summary)
@@ -156,7 +158,14 @@ Includes all fields — suitable for the detail/editor view.
   "teamId": "683a1f2c9d4e5b0087654321",
   "createdBy": "user@company.com",
   "createdAt": "2026-06-03T10:00:00",
-  "updatedAt": "2026-06-03T10:00:00"
+  "updatedAt": "2026-06-03T10:00:00",
+  "terminatedAt": null,
+  "terminatedBy": null,
+  "renewalStatus": null,
+  "renewedContractId": null,
+  "renewedFromId": null,
+  "renewalStartDate": null,
+  "renewalNotes": null
 }
 ```
 
@@ -167,7 +176,7 @@ Includes all fields — suitable for the detail/editor view.
 | client           | String            | Name of the counterparty                                                    |
 | description      | String            | Auto-generated from templateName if not provided                            |
 | category         | String            | Contract category (e.g. Services, NDA, Employment). Max 50 chars.           |
-| status           | ContractStatus    | See [ContractStatus Enum](#44-contractstatus-enum). Always `DRAFT` on create |
+| status           | ContractStatus    | See [ContractStatus Enum](#44-contractstatus-enum). Always `DRAFT` on create. For finalized contracts, returns a computed value (`ACTIVE`, `EXPIRING`, or `EXPIRED`) based on dates — see note below. |
 | startDate        | LocalDate         | Defaults to today if not provided                                           |
 | endDate          | LocalDate         | Defaults to `startDate + 1 year` if not provided                            |
 | expiresInDays    | Long              | Days until endDate from today. Negative = already expired                   |
@@ -184,6 +193,15 @@ Includes all fields — suitable for the detail/editor view.
 | createdBy        | String            | Email of the owning user. Set from JWT — never from request body            |
 | createdAt        | DateTime          | Creation timestamp. Set by server                                           |
 | updatedAt        | DateTime          | Last modification timestamp. Set by server                                  |
+| terminatedAt     | DateTime \| null  | Timestamp when the contract was terminated. `null` until terminated.        |
+| terminatedBy     | String \| null    | Email of the user who terminated the contract. `null` until terminated.     |
+| renewalStatus    | String \| null    | `"in_progress"` when a renewal draft is active. `null` otherwise. Cleared on termination. |
+| renewedContractId | String \| null   | ID of the renewal draft contract created from this one. `null` until a renewal is created. Cleared on termination. |
+| renewedFromId    | String \| null    | ID of the original contract this was renewed from. `null` if this is not a renewal. |
+| renewalStartDate | String \| null    | ISO date of the pending renewal's start date. Used for UI tooltip display.  |
+| renewalNotes     | String \| null    | Optional notes entered when the renewal was created.                        |
+
+> **Status computation note:** Once a contract reaches the `SIGNED` state, the `status` field in every response is computed at read time from `startDate` and `endDate`. The database always stores `SIGNED` — the API returns `ACTIVE`, `EXPIRING`, or `EXPIRED` based on current date logic. See [ContractStatus Enum](#44-contractstatus-enum) for the full rules.
 
 ---
 
@@ -215,6 +233,8 @@ Returned by `GET /contracts`. Lightweight — excludes heavy fields (`xfdfData`,
 
 > `xfdfData`, `fieldValues`, `formFields`, and `parties` are **not included** in list responses. Use `GET /contracts/{id}` to fetch these for a specific contract.
 
+> **Status field:** For contracts in a post-finalization state, `status` is computed at read time and will be `ACTIVE`, `EXPIRING`, or `EXPIRED` — never the raw `SIGNED` value stored in the database. Use the returned `status` directly; do not re-derive it from `startDate`/`endDate` on the frontend.
+
 ---
 
 ### 4.3 Party Object
@@ -239,25 +259,38 @@ Returned by `GET /contracts`. Lightweight — excludes heavy fields (`xfdfData`,
 
 ### 4.4 ContractStatus Enum
 
-| Status                | Description                                            |
-|-----------------------|--------------------------------------------------------|
-| `DRAFT`               | Created but not yet submitted. Default on creation.    |
-| `IN_REVIEW`           | Submitted for internal review                          |
-| `IN_APPROVAL`         | Under approval process                                 |
-| `APPROVED`            | Approved internally                                    |
-| `READY_FOR_SIGNATURE` | Ready to be sent out for signatures                    |
-| `WAITING_FOR_SIGNATURE` | Sent to signatories, awaiting response               |
-| `SIGNED_BY_EVERYONE`  | All parties have signed                                |
-| `SIGNED`              | Fully executed                                         |
-| `ACTIVE`              | Currently in force                                     |
-| `EXPIRING`            | Active but approaching end date                        |
-| `EXPIRED`             | Past end date                                          |
-| `TERMINATED`          | Manually terminated before end date                   |
-| `REJECTED`            | Rejected (generic)                                     |
-| `REJECTED_BY_REVIEWER` | Rejected during review stage                          |
-| `REJECTED_BY_APPROVER` | Rejected during approval stage                        |
+#### Workflow Statuses — stored in the database
 
-> Status transitions are managed by the application workflow. The `status` field in `PATCH /{id}` is currently not exposed — status changes occur through workflow actions.
+These values are written by the application workflow and are returned as-is in every API response.
+
+| Status | Description |
+|---|---|
+| `DRAFT` | Default on creation. Contract metadata is entered but not yet submitted for review. |
+| `IN_REVIEW` | Submitted for internal review. Reviewers can approve or reject. |
+| `IN_APPROVAL` | Passed review and is now under approval. Approvers can approve or reject. |
+| `READY_FOR_SIGNATURE` | Approved and ready to be sent out for e-signatures. |
+| `IN_SIGNATURE` | Signature round in progress — at least one signer has been notified. |
+| `SIGNED_BY_EVERYONE` | All required parties have signed. Awaiting contractor finalization. |
+| `SIGNED` | Contractor has finalized the contract. Final PDF generated and sent to all parties. **This is the stored DB value for all post-finalization states — it is never returned directly in a response once dates are set; see computed statuses below.** |
+| `TERMINATED` | Manually terminated before the natural `endDate`. Never recomputed. |
+| `REJECTED_BY_REVIEWER` | Reviewer rejected the contract during `IN_REVIEW`. |
+| `REJECTED_BY_APPROVER` | Approver rejected the contract during `IN_APPROVAL`. |
+
+#### Computed Statuses — derived at read time, never stored
+
+Once a contract is `SIGNED`, the API computes the effective status from `startDate`, `endDate`, and the current date on every read. The database continues to store `SIGNED`; these values only appear in API responses.
+
+| Status | Condition | Description |
+|---|---|---|
+| `ACTIVE` | `startDate ≤ today` AND `endDate > today + 30 days` | Contract is in force and not approaching expiry. |
+| `EXPIRING` | `endDate` is within **30 days** (inclusive) from today | Contract is running but approaching its end date. Show expiry warning UI. |
+| `EXPIRED` | `endDate < today` | Contract has passed its end date. |
+
+> **Computation priority:** EXPIRED is checked first, then EXPIRING (≤ 30 days), then ACTIVE (startDate ≤ today). If `endDate` is null, the status stays `SIGNED`. If `startDate` is in the future (and endDate > 30 days), the status stays `SIGNED` — the contract is finalized but not yet in force.
+
+> **Do not filter** `GET /contracts?status=ACTIVE` or `?status=EXPIRING` or `?status=EXPIRED` — these values are never stored in the database. The query will return zero results. Apply post-finalization status filtering client-side using the `status` field from the response.
+
+> Status transitions are managed by the application workflow. The `status` field in `PATCH /{id}` is not writable — status changes occur only through workflow actions.
 
 ---
 
@@ -384,7 +417,7 @@ GET /contracts
 | Parameter | Type   | Required | Description                                                              |
 |-----------|--------|----------|--------------------------------------------------------------------------|
 | teamId    | String | No       | Filter by team ID. Returns only contracts assigned to this team.         |
-| status    | String | No       | Filter by status. Case-insensitive. See [ContractStatus](#44-contractstatus-enum). |
+| status    | String | No       | Filter by status. Case-insensitive. Matches the value **stored in the database**. See [ContractStatus Enum](#44-contractstatus-enum). **Do not use `ACTIVE`, `EXPIRING`, or `EXPIRED` here** — these are computed values, never stored. Use `SIGNED` to retrieve all finalized contracts and filter client-side. |
 
 **Response — 200 OK**
 
@@ -422,9 +455,11 @@ curl -X GET "http://localhost:8080/contracts?status=DRAFT" \
 **curl — Filter by both**
 
 ```bash
-curl -X GET "http://localhost:8080/contracts?teamId=683a1f2c9d4e5b0087654321&status=ACTIVE" \
+curl -X GET "http://localhost:8080/contracts?teamId=683a1f2c9d4e5b0087654321&status=SIGNED" \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
+
+> To retrieve all finalized contracts regardless of computed status (`ACTIVE`, `EXPIRING`, `EXPIRED`), filter by `status=SIGNED`. The response will include the computed status for each contract — filter further client-side if needed.
 
 ---
 
@@ -880,6 +915,85 @@ curl -X POST "http://localhost:8080/contracts/CONTRACT_ID/file/abort?uploadId=UP
 
 ---
 
+### 5.11 Terminate Contract
+
+Permanently terminates a contract that has expired (past its `endDate`). This action is **irreversible** — once terminated, the status cannot be changed back. The acting user is identified from the JWT token; no request body is required.
+
+```
+POST /contracts/{id}/terminate
+```
+
+**Headers**
+
+| Header | Required | Value |
+|---|---|---|
+| Authorization | Yes | `Bearer <token>` |
+
+**Path Parameters**
+
+| Parameter | Description |
+|---|---|
+| id | MongoDB ID of the contract to terminate |
+
+**Request Body**
+
+None. This endpoint requires no body. The `terminatedBy` value is derived from the JWT token.
+
+**Prerequisites — the contract must be:**
+- Owned by the authenticated user
+- In a computed `EXPIRED` state — meaning stored status is `SIGNED` AND `endDate` is before today
+- Not already in a `TERMINATED` state (if already terminated, the call is idempotent — see below)
+- Not blocked by an active renewal (`renewalStatus != "in_progress"`)
+
+**Response — 200 OK (terminated successfully)**
+
+```json
+{
+  "success": true,
+  "alreadyTerminated": false
+}
+```
+
+**Response — 200 OK (already terminated — idempotent)**
+
+Calling terminate on a contract that is already `TERMINATED` returns success without making any changes to the database.
+
+```json
+{
+  "success": true,
+  "alreadyTerminated": true
+}
+```
+
+**Error Responses**
+
+| Status | Message | Cause |
+|---|---|---|
+| 400 | `Cannot terminate a contract with status "<status>". Only expired contracts can be terminated.` | Contract is not EXPIRED. The quoted status is the computed value the user sees (e.g. `"ACTIVE"`, `"EXPIRING"`, `"DRAFT"`). |
+| 401 | Unauthorized | Token missing or expired |
+| 404 | Contract not found | ID does not exist or belongs to another user |
+| 409 | Cannot terminate a contract that has an active renewal in progress. Cancel or complete the renewal first. | `renewalStatus == "in_progress"` |
+
+**What happens in the database on success:**
+
+| Field | Value set |
+|---|---|
+| `status` | `TERMINATED` |
+| `terminatedAt` | Server timestamp (`LocalDateTime.now()`) |
+| `terminatedBy` | Email from JWT token |
+| `renewalStatus` | `null` (cleared) |
+| `renewedContractId` | `null` (cleared) |
+| `updatedAt` | Server timestamp |
+
+**curl**
+
+```bash
+curl -X POST http://localhost:8080/contracts/CONTRACT_ID/terminate \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
 ## 6. End-to-End Flows
 
 ### 6.1 Metadata Only
@@ -978,6 +1092,36 @@ fileSize ≥ 30 MB  →  initiate → presign → PUT to MinIO → complete
 
 ---
 
+### 6.4 Terminate a Contract
+
+Use when a contract has passed its `endDate` and must be formally closed in the system.
+
+```
+Step 1   POST /auth/login
+         ← { token }
+
+Step 2   GET /contracts
+         ← [ { id, status: "EXPIRED", endDate: "...", ... }, ... ]
+         → Identify the contract with status "EXPIRED"
+
+Step 3   POST /contracts/{id}/terminate
+         Headers: Authorization: Bearer <token>
+         (no body)
+         ←  { "success": true, "alreadyTerminated": false }
+
+Step 4   GET /contracts/{id}              (optional — verify termination)
+         ← { status: "TERMINATED", terminatedAt: "...", terminatedBy: "..." }
+```
+
+**Notes:**
+
+- The `status` in Step 2 is a **computed** value. The database stores `SIGNED`; the API returns `EXPIRED` based on the current date and `endDate`.
+- If Step 3 is called again (retry), it returns `{ "success": true, "alreadyTerminated": true }` — no error.
+- If `renewalStatus` is `"in_progress"` when Step 3 is called, a 409 is returned. The renewal must be cancelled or completed first.
+- After termination, `GET /contracts?status=TERMINATED` will match this contract (since `TERMINATED` is stored directly in the database).
+
+---
+
 ## 7. Business Rules
 
 | Rule | Detail |
@@ -990,6 +1134,22 @@ fileSize ≥ 30 MB  →  initiate → presign → PUT to MinIO → complete
 | Date validation | `endDate` must be ≥ `startDate`. Rejected with 400 otherwise. |
 | description default | Auto-generated as `"Contract based on {templateName}"` if not provided. |
 | category | Free text. Max 50 characters. |
+| **Stored status** | The database always stores `SIGNED` for finalized contracts. `ACTIVE`, `EXPIRING`, and `EXPIRED` are never written to the database. |
+| **Computed status** | For any contract whose stored status is `SIGNED`, the `status` field in every API response is computed at request time from `startDate`, `endDate`, and the current date. |
+| **EXPIRED rule** | If `endDate` is before today, status is `EXPIRED`. |
+| **EXPIRING rule** | If `endDate` is within 30 days from today (inclusive), status is `EXPIRING`. The 30-day threshold is inclusive — exactly 30 days remaining is `EXPIRING`. |
+| **ACTIVE rule** | If `startDate ≤ today` and `endDate` is more than 30 days away, status is `ACTIVE`. |
+| **SIGNED (pending start)** | If `startDate` is in the future (and `endDate` > 30 days away), status stays `SIGNED`. The contract is finalized but not yet in force. |
+| **No endDate** | If `endDate` is null, no computation runs. The status stays `SIGNED`. |
+| **Status filter limitation** | `GET /contracts?status=ACTIVE/EXPIRING/EXPIRED` returns zero results — these values are never stored. Use `?status=SIGNED` to retrieve all finalized contracts, then filter client-side. |
+| **Termination eligibility** | Only contracts with a computed status of `EXPIRED` (stored `SIGNED` + `endDate` before today) can be terminated. All other statuses — including `ACTIVE`, `EXPIRING`, `DRAFT`, workflow statuses — return 400. |
+| **Termination is irreversible** | Once a contract is `TERMINATED`, no endpoint changes the status back. `TERMINATED` is a terminal state. |
+| **Termination is idempotent** | Calling `POST /{id}/terminate` on an already-terminated contract returns `{ "success": true, "alreadyTerminated": true }` with HTTP 200 — no error, no DB write. |
+| **terminatedBy from JWT** | The `terminatedBy` field stored on termination is taken from the JWT token, not the request body. No body is sent by the caller. |
+| **terminatedAt from server** | The termination timestamp is always set server-side (`LocalDateTime.now()`). The client never provides it. |
+| **Renewal blocks termination** | If `renewalStatus == "in_progress"`, termination returns 409. Cancel or complete the renewal first. |
+| **Renewal linkage cleared** | On successful termination, `renewalStatus` and `renewedContractId` are set to `null`. |
+| **TERMINATED passes through status computation** | `TERMINATED` is never recomputed from dates — it is returned exactly as stored. |
 | Single-shot limit | Files ≥ 30 MB must use chunked upload. Single-shot returns 400 if `Content-Length ≥ 30MB`. |
 | Content-Length required | The `PUT /{id}/file` endpoint requires `Content-Length` in the request headers. |
 | PDF validation | Both upload paths validate the `%PDF` magic bytes. Single-shot validates before storing. Chunked complete validates after assembly — if invalid, the assembled file is deleted from MinIO and 400 is returned. |
@@ -1028,3 +1188,4 @@ A background scheduler runs every day at **02:00 AM** to clean up abandoned chun
 | GET    | `/contracts/{id}/file/presign`    | Authenticated | Get presigned PUT URL for a single chunk            |
 | POST   | `/contracts/{id}/file/complete`   | Authenticated | Assemble all chunks into final PDF                  |
 | POST   | `/contracts/{id}/file/abort`      | Authenticated | Cancel chunked upload and clean up MinIO            |
+| POST   | `/contracts/{id}/terminate`       | Owner only    | Permanently terminate an expired contract           |

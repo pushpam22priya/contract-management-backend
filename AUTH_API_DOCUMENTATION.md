@@ -3,7 +3,7 @@
 **Project:** Contract Management System
 **Version:** 1.0.0
 **Base URL:** `http://localhost:8080`
-**Last Updated:** 2026-05-19
+**Last Updated:** 2026-06-23
 
 ---
 
@@ -25,12 +25,14 @@
 
 ## Overview
 
-This API uses a **stateless JWT-based authentication** system. There is a single endpoint `/auth/login` that handles both registration and login:
+This API uses a **stateless JWT-based authentication** system. The `/auth` module exposes two endpoints:
 
-- If the email does not exist in the database → the user is **automatically registered** and a token is returned.
-- If the email already exists → the password is **validated** and a token is returned on success.
+- **`POST /auth/login`** — handles both registration and login:
+  - If the email does not exist → the user is **automatically registered** and a token is returned.
+  - If the email already exists → the password is **validated** and a token is returned on success.
+- **`POST /auth/logout`** — **invalidates** the caller's current JWT by adding its JTI to a MongoDB blacklist. Any subsequent request using the same token is rejected with `401 Unauthorized`, even if the token's cryptographic signature is still valid and it has not yet expired.
 
-No separate `/register` endpoint is needed.
+No separate `/register` endpoint is needed. Logout is achieved without session storage — a lightweight **JTI (JWT ID) blacklist** in MongoDB bridges stateless JWT with logout semantics. MongoDB's TTL index automatically cleans up blacklist entries once the original token would have expired.
 
 ---
 
@@ -46,6 +48,7 @@ No separate `/register` endpoint is needed.
 | Database          | MongoDB                                             |
 | File Storage      | MinIO                                               |
 | Validation        | Jakarta Validation (spring-boot-starter-validation) |
+| Token Blacklist   | MongoDB `revoked_tokens` collection (JTI-based)     |
 | API Documentation | SpringDoc OpenAPI 2.8.8 (Swagger UI)                |
 
 ---
@@ -148,6 +151,7 @@ All subsequent requests from Swagger UI will automatically include the `Authoriz
 | `@ApiResponses` + `@ApiResponse` | `/auth/login` method | Documents 200, 400, 401 responses with examples |
 | `@ExampleObject` | Response content | Provides real JSON examples for each response case |
 | `@SecurityRequirements` | `/auth/login` method | Marks login as public (overrides global JWT requirement) |
+| `@SecurityRequirement` | `/auth/logout` method | Marks logout as requiring a Bearer token in Swagger UI |
 | `@Schema` | `AuthRequest`, `AuthResponse` | Documents each field with description, example, and constraints |
 
 ---
@@ -155,54 +159,54 @@ All subsequent requests from Swagger UI will automatically include the `Authoriz
 ## Authentication Flow
 
 ```
-┌─────────┐         ┌──────────────┐        ┌──────────┐       ┌─────────┐
-│  Client │         │AuthController│        │AuthService│       │ MongoDB │
-└────┬────┘         └──────┬───────┘        └─────┬─────┘       └────┬────┘
-     │  POST /auth/login   │                      │                   │
-     │ {email, password}   │                      │                   │
-     │────────────────────>│                      │                   │
-     │                     │  @Valid validates     │                   │
-     │                     │  email + password     │                   │
-     │                     │                      │                   │
-     │                     │  authenticate(req)   │                   │
-     │                     │─────────────────────>│                   │
-     │                     │                      │  findByEmail()    │
-     │                     │                      │──────────────────>│
-     │                     │                      │                   │
-     │                     │           ┌──────────┴──────────┐        │
-     │                     │           │  User found?         │        │
-     │                     │           ├──────────────────────┤        │
-     │                     │           │  NO → Register user  │        │
-     │                     │           │  - Assign role       │        │
-     │                     │           │  - BCrypt password   │        │
-     │                     │           │  - Save to MongoDB   │        │
-     │                     │           │                      │        │
-     │                     │           │  YES → Validate pass │        │
-     │                     │           │  - BCrypt.matches()  │        │
-     │                     │           │  - Fail → 401        │        │
-     │                     │           └──────────┬──────────┘        │
-     │                     │                      │                   │
-     │                     │                      │  generateToken()  │
-     │                     │                      │  (email + role)   │
-     │                     │                      │                   │
-     │                     │   AuthResponse        │                   │
-     │                     │<─────────────────────│                   │
-     │  200 OK + JWT token │                      │                   │
-     │<────────────────────│                      │                   │
-     │                     │                      │                   │
+┌─────────┐     ┌──────────────┐    ┌───────────┐    ┌──────────────────────┐
+│  Client │     │AuthController│    │AuthService│    │       MongoDB        │
+└────┬────┘     └──────┬───────┘    └─────┬─────┘    └──────────┬───────────┘
+     │                 │                  │                      │
+     │─── POST /auth/login ──────────────>│                      │
+     │   {email, password}                │  findByEmail() ─────>│
+     │                 │                  │<──────────────────────│
+     │                 │           ┌──────┴──────┐               │
+     │                 │           │ User found? │               │
+     │                 │           │  NO → register + BCrypt     │
+     │                 │           │  YES → BCrypt.matches()     │
+     │                 │           │        fail → 401           │
+     │                 │           └──────┬──────┘               │
+     │                 │                  │ generateToken()       │
+     │                 │                  │  (sub=email,          │
+     │                 │                  │   role, jti=UUID)     │
+     │<── 200 {token, email, role, newUser} ────────────────────  │
+     │                 │                  │                      │
+     │                 │                  │                      │
+     │─── POST /auth/logout ─────────────>│                      │
+     │   Authorization: Bearer <token>    │  extractJti()         │
+     │                 │                  │  extractExpiration()  │
+     │                 │                  │  save(RevokedToken) ─>│ insert
+     │<── 200 {message: "Logged out"} ──  │                      │ {jti, expiresAt}
+     │                 │                  │                      │
+     │                 │                  │                      │
+     │─── GET /contracts (same token) ──> │                      │
+     │         JwtAuthFilter:             │                      │
+     │         1. isTokenValid() → true   │                      │
+     │         2. isRevoked() ────────────────────────────────── >│ existsByJti()
+     │                 │         ← true ─────────────────────────│
+     │         → SecurityContext NOT set  │                      │
+     │<── 401 Unauthorized ───────────────│                      │
+     │                 │                  │                      │
+     │         (token TTL expires)        │                      │
+     │                 │                  │             MongoDB TTL auto-deletes
+     │                 │                  │             RevokedToken document
 
-Future Requests:
-     │  POST /any-protected-endpoint              │                   │
-     │  Authorization: Bearer <token>             │                   │
-     │────────────────────>│                      │                   │
-     │              JwtAuthFilter runs            │                   │
-     │              - Validates token signature   │                   │
-     │              - Checks expiry               │                   │
-     │              - Extracts email + role       │                   │
-     │              - Sets SecurityContext        │                   │
-     │                     │                      │                   │
-     │  200 OK / 403       │                      │                   │
-     │<────────────────────│                      │                   │
+Protected Request (with valid non-revoked token):
+     │─── GET /contracts ─────────────── >│                      │
+     │   Authorization: Bearer <token>    │                      │
+     │         JwtAuthFilter:             │                      │
+     │         1. isTokenValid() → true   │                      │
+     │         2. isRevoked() ────────────────────────────────── >│ existsByJti()
+     │                 │         ← false ────────────────────────│
+     │         3. extractEmail() + extractRole()                  │
+     │         4. SecurityContext set     │                      │
+     │<── 200 OK + data ─────────────────│                      │
 ```
 
 ---
@@ -231,6 +235,7 @@ eyJhbGciOiJIUzI1NiJ9 . eyJzdWIiOiJ1c2VyQGdtYWlsLmNvbSIsInJvbGUiOiJVU0VSIn0 . Sfl
 
 ```json
 {
+  "jti": "550e8400-e29b-41d4-a716-446655440000",
   "sub": "user@gmail.com",
   "role": "USER",
   "iat": 1716100800,
@@ -238,12 +243,15 @@ eyJhbGciOiJIUzI1NiJ9 . eyJzdWIiOiJ1c2VyQGdtYWlsLmNvbSIsInJvbGUiOiJVU0VSIn0 . Sfl
 }
 ```
 
-| Claim | Description                              |
-|-------|------------------------------------------|
-| `sub` | Subject — the user's email address       |
-| `role`| User role — `USER` or `ADMIN`            |
-| `iat` | Issued At — Unix timestamp of creation   |
-| `exp` | Expiration — Unix timestamp of expiry    |
+| Claim  | RFC 7519 Name | Source              | Description                                          |
+|--------|---------------|---------------------|------------------------------------------------------|
+| `jti`  | JWT ID        | `UUID.randomUUID()` | Unique token identifier — used for blacklisting on logout |
+| `sub`  | Subject       | User's email        | User's email address                                 |
+| `role` | *(custom)*    | Role at login time  | `USER` or `ADMIN`                                    |
+| `iat`  | Issued At     | `new Date()`        | Unix timestamp of token creation                     |
+| `exp`  | Expiration    | `iat + expiration`  | Unix timestamp after which the token is rejected     |
+
+> **Why `jti`?** RFC 7519 defines the `jti` claim as a unique identifier for a JWT. Because each token gets a random UUID as its `jti` at generation time, the server can blacklist a specific token on logout without invalidating all tokens issued for the same user.
 
 ### Configuration
 
@@ -354,6 +362,43 @@ Content-Type: application/json
 
 ---
 
+---
+
+### POST /auth/logout
+
+Invalidates the caller's current JWT by recording its JTI in the `revoked_tokens` MongoDB collection. All subsequent requests using the same token will be rejected with `401 Unauthorized` by `JwtAuthFilter`, even if the token has not expired yet.
+
+**URL:** `POST /auth/logout`  
+**Auth Required:** Yes — `Authorization: Bearer <token>`  
+
+**Request:**
+
+```http
+POST /auth/logout
+Authorization: Bearer eyJhbGciOiJIUzI1NiJ9...
+```
+
+No request body is required.
+
+**Response — `200 OK`:**
+
+```json
+{
+  "message": "Logged out successfully"
+}
+```
+
+> If the `Authorization` header is absent the endpoint returns `200` as a no-op — no error is raised.
+
+**After logout — any request with the same token:**
+
+```
+HTTP/1.1 401 Unauthorized
+Unauthorized
+```
+
+---
+
 ### Using the Token (Protected Endpoints)
 
 Pass the token in the `Authorization` header for all protected routes:
@@ -416,6 +461,28 @@ Stored in the `users` collection:
 
 > **Note:** The raw `password` is never stored or returned. Only the BCrypt hash is persisted.
 
+### RevokedToken (MongoDB Document)
+
+Stored in the `revoked_tokens` collection. Created on every `/auth/logout` call. Automatically deleted by MongoDB's TTL mechanism once `expiresAt` passes.
+
+```json
+{
+  "_id": "ObjectId",
+  "jti": "string (unique index)",
+  "expiresAt": "ISODate (TTL index — auto-deleted after this date)"
+}
+```
+
+| Field       | Index              | Description                                                   |
+|-------------|--------------------|---------------------------------------------------------------|
+| `jti`       | Unique             | The JWT ID extracted from the revoked token                   |
+| `expiresAt` | TTL (`expireAfterSeconds: 0`) | Mirrors the token's `exp` claim — document is auto-deleted when the original token would have expired |
+
+> **Required configuration** for the TTL index to be created automatically:
+> ```properties
+> spring.data.mongodb.auto-index-creation=true
+> ```
+
 ---
 
 ## Error Handling
@@ -438,6 +505,7 @@ All errors follow a consistent structure:
 | `400`       | Missing required fields            | `{ "status": 400, "error": "Validation Failed", "fields": { "email": "Email is required" } }` |
 | `401`       | Wrong password for existing user   | `{ "status": 401, "error": "Invalid password" }`                              |
 | `401`       | Missing or expired JWT token       | `401 Unauthorized`                                                            |
+| `401`       | Token has been revoked (logged out)| `401 Unauthorized`                                                            |
 | `403`       | Valid token but insufficient role  | `403 Forbidden`                                                               |
 | `500`       | Unexpected server error            | `{ "status": 500, "error": "Internal server error" }`                         |
 
@@ -479,10 +547,18 @@ All errors follow a consistent structure:
 | Route                          | Public | USER | ADMIN |
 |--------------------------------|--------|------|-------|
 | `POST /auth/login`             | Yes    | Yes  | Yes   |
+| `POST /auth/logout`            | No     | Yes  | Yes   |
 | `GET /swagger-ui/index.html`   | Yes    | Yes  | Yes   |
 | `GET /api-docs`                | Yes    | Yes  | Yes   |
-| `POST /test/upload`            | No     | Yes  | Yes   |
+| `GET /sign-requests/*`         | Yes    | Yes  | Yes   |
+| `POST /sign-requests/*/upload/**` | Yes | Yes | Yes  |
+| `GET /templates/**`            | No     | Yes  | Yes   |
+| `GET /categories/**`           | No     | Yes  | Yes   |
+| `POST/PUT/DELETE /templates/**`| No     | No   | Yes   |
+| `POST/PUT/DELETE /categories/**`| No    | No   | Yes   |
 | `GET /admin/**`                | No     | No   | Yes   |
+| `/teams/**`                    | No     | Yes  | Yes   |
+| `/contracts/**`                | No     | Yes  | Yes   |
 
 ### How Role is Enforced
 
@@ -501,6 +577,9 @@ All errors follow a consistent structure:
 | Token signing            | HMAC-SHA256 with a 256-bit secret key — tokens cannot be forged             |
 | Token expiry             | 24 hours — limits the window of a stolen token                              |
 | Stateless sessions       | No server-side session storage — scales horizontally                        |
+| Logout / token revocation| JTI blacklist in MongoDB `revoked_tokens` — `JwtAuthFilter` checks blacklist on every request after signature validation |
+| Blacklist auto-cleanup   | MongoDB TTL index on `expiresAt` — revoked token documents are deleted automatically when the original token would have expired; collection stays small |
+| Unique token identity    | Each token gets a random `jti` (UUID) at generation — logout revokes only that specific token, not all tokens for the user |
 | CSRF                     | Disabled — not needed for stateless token-based APIs                        |
 | Transport security       | Use HTTPS in production to prevent token interception                       |
 | Secret key management    | Move `jwt.secret` to environment variables in production — never commit secrets to git |
@@ -516,6 +595,8 @@ All errors follow a consistent structure:
 - [ ] Add request logging for audit trail
 - [ ] Disable Swagger UI in production: `springdoc.swagger-ui.enabled=false`
 - [ ] Restrict `/api-docs` access in production if not needed publicly
+- [ ] Ensure `spring.data.mongodb.auto-index-creation=true` is set so the TTL index on `revoked_tokens.expiresAt` is created on startup
+- [ ] For high-throughput systems, consider migrating the JTI blacklist from MongoDB to Redis for O(1) in-memory lookup (`TokenBlacklistService` is already isolated so the storage backend can be swapped without touching `JwtAuthFilter`)
 
 ---
 
@@ -647,4 +728,54 @@ curl -X GET http://localhost:8080/admin/dashboard \
 
 ---
 
-*Documentation generated for Contract Management System — Authentication Module v1.0.0*
+#### 9. Logout
+
+```bash
+curl -X POST http://localhost:8080/auth/logout \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN_HERE"
+```
+
+**Expected:** `200 OK`
+```json
+{ "message": "Logged out successfully" }
+```
+
+---
+
+#### 10. Use Revoked Token After Logout
+
+```bash
+# Use the exact same token from step 9
+curl -X GET http://localhost:8080/contracts \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN_HERE"
+```
+
+**Expected:** `401 Unauthorized` — token is blacklisted even though its signature is still cryptographically valid
+
+---
+
+#### 11. Logout Without a Token (No-Op)
+
+```bash
+curl -X POST http://localhost:8080/auth/logout
+```
+
+**Expected:** `200 OK` — no error raised; endpoint is a no-op when the header is absent
+
+---
+
+### Testing via Swagger UI — Logout
+
+**Step 1** — Authorize in Swagger UI as described above (get a token, click **Authorize**)
+
+**Step 2** — Expand **Authentication** → `POST /auth/logout` → click **Try it out** → **Execute**
+
+**Step 3** — You should see `200 { "message": "Logged out successfully" }`
+
+**Step 4** — Without removing the token from the **Authorize** dialog, try any protected endpoint (e.g., `GET /contracts`)
+
+**Step 5** — You should see `401 Unauthorized` — the token has been blacklisted
+
+---
+
+*Documentation generated for Contract Management System — Authentication Module v1.1.0*

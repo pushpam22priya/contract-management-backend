@@ -8,6 +8,7 @@ import org.springframework.stereotype.Service;
 import javax.crypto.SecretKey;
 import java.util.Date;
 import java.util.HexFormat;
+import java.util.UUID;
 
 @Service
 public class JwtService {
@@ -25,6 +26,7 @@ public class JwtService {
 
     public String generateToken(String email, String role) {
         return Jwts.builder()
+                .id(UUID.randomUUID().toString())
                 .subject(email)
                 .claim("role", role)
                 .issuedAt(new Date())
@@ -33,7 +35,25 @@ public class JwtService {
                 .compact();
     }
 
-    public String extractRole(String token) {
+    public String extractJti(String token) {
+        return Jwts.parser()
+                .verifyWith(getSigningKey())
+                .build()
+                .parseSignedClaims(token)
+                .getPayload()
+                .getId();
+    }
+
+    public Date extractExpiration(String token) {
+        return Jwts.parser()
+                .verifyWith(getSigningKey())
+                .build()
+                .parseSignedClaims(token)
+                .getPayload()
+                .getExpiration();
+    }
+
+        public String extractRole(String token) {
         return Jwts.parser()
                 .verifyWith(getSigningKey())
                 .build()

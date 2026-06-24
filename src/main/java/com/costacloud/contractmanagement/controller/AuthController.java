@@ -14,6 +14,10 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import com.costacloud.contractmanagement.service.TokenBlacklistService;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import jakarta.servlet.http.HttpServletRequest;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/auth")
@@ -21,9 +25,11 @@ import org.springframework.web.bind.annotation.*;
 public class AuthController {
 
     private final AuthService authService;
+    private final TokenBlacklistService tokenBlacklistService;
 
-    public AuthController(AuthService authService) {
+    public AuthController(AuthService authService, TokenBlacklistService tokenBlacklistService) {
         this.authService = authService;
+        this.tokenBlacklistService = tokenBlacklistService;
     }
 
     @Operation(
@@ -83,5 +89,16 @@ public class AuthController {
     public ResponseEntity<AuthResponse> login(@Valid @RequestBody AuthRequest request) {
         AuthResponse response = authService.authenticate(request);
         return ResponseEntity.ok(response);
+    }
+
+    @Operation(summary = "Logout — invalidates the current JWT token")
+    @SecurityRequirement(name = "bearerAuth")
+    @PostMapping("/logout")
+    public ResponseEntity<Map<String, String>> logout(HttpServletRequest request) {
+        String authHeader = request.getHeader("Authorization");
+        if (authHeader != null && authHeader.startsWith("Bearer ")) {
+            tokenBlacklistService.revokeToken(authHeader.substring(7));
+        }
+        return ResponseEntity.ok(Map.of("message", "Logged out successfully"));
     }
 }

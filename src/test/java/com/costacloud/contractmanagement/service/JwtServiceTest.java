@@ -113,6 +113,85 @@ class JwtServiceTest {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // extractJti
+    // ─────────────────────────────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("extractJti")
+    class ExtractJti {
+
+        @Test
+        @DisplayName("returns a non-null JTI from a freshly generated token")
+        void shouldReturnNonNull_jti() {
+            String token = jwtService.generateToken("user@test.com", "USER");
+
+            assertNotNull(jwtService.extractJti(token));
+        }
+
+        @Test
+        @DisplayName("JTI is a non-blank string")
+        void shouldReturnNonBlank_jti() {
+            String token = jwtService.generateToken("user@test.com", "USER");
+
+            assertFalse(jwtService.extractJti(token).isBlank());
+        }
+
+        @Test
+        @DisplayName("each generated token has a unique JTI")
+        void shouldProduceUniqueJti_perToken() {
+            String t1 = jwtService.generateToken("user@test.com", "USER");
+            String t2 = jwtService.generateToken("user@test.com", "USER");
+
+            assertNotEquals(jwtService.extractJti(t1), jwtService.extractJti(t2));
+        }
+
+        @Test
+        @DisplayName("extractJti is consistent — same token returns same JTI each call")
+        void shouldReturnSameJti_forSameToken() {
+            String token = jwtService.generateToken("user@test.com", "USER");
+
+            assertEquals(jwtService.extractJti(token), jwtService.extractJti(token));
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // extractExpiration
+    // ─────────────────────────────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("extractExpiration")
+    class ExtractExpiration {
+
+        @Test
+        @DisplayName("returns a non-null expiration date")
+        void shouldReturnNonNull_expiration() {
+            String token = jwtService.generateToken("user@test.com", "USER");
+
+            assertNotNull(jwtService.extractExpiration(token));
+        }
+
+        @Test
+        @DisplayName("expiration is in the future for a freshly generated token")
+        void shouldReturnFutureDate_forFreshToken() {
+            String token = jwtService.generateToken("user@test.com", "USER");
+
+            assertTrue(jwtService.extractExpiration(token).after(new java.util.Date()));
+        }
+
+        @Test
+        @DisplayName("expiration is approximately now + expiry duration")
+        void shouldReturnDate_approximatelyNowPlusExpiry() {
+            String token = jwtService.generateToken("user@test.com", "USER");
+
+            long expiryMs = jwtService.extractExpiration(token).getTime();
+            long expectedMs = System.currentTimeMillis() + EXPIRY_MS;
+
+            // Allow 5-second tolerance for test execution time
+            assertTrue(Math.abs(expiryMs - expectedMs) < 5_000);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // isTokenValid
     // ─────────────────────────────────────────────────────────────────────────
 
