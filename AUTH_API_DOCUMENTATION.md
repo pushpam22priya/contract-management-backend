@@ -557,7 +557,7 @@ All errors follow a consistent structure:
 | `POST/PUT/DELETE /templates/**`| No     | No   | Yes   |
 | `POST/PUT/DELETE /categories/**`| No    | No   | Yes   |
 | `GET /admin/**`                | No     | No   | Yes   |
-| `/teams/**`                    | No     | Yes  | Yes   |
+| `/folders/**`                  | No     | Yes  | Yes   |
 | `/contracts/**`                | No     | Yes  | Yes   |
 
 ### How Role is Enforced
