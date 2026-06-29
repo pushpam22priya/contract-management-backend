@@ -13,7 +13,7 @@ import java.util.Map;
 
 @Document(collection = "contracts")
 @CompoundIndexes({
-        @CompoundIndex(name = "idx_createdBy_teamId_status", def = "{'createdBy': 1, 'teamId': 1, 'status': 1}"),
+        @CompoundIndex(name = "idx_createdBy_folderId_status", def = "{'createdBy': 1, 'folderId': 1, 'status': 1}"),
         @CompoundIndex(name = "idx_title_createdBy",         def = "{'title': 1, 'createdBy': 1}"),
         @CompoundIndex(name = "idx_fileUploaded_uploadAt",   def = "{'fileUploaded': 1, 'uploadInitiatedAt': 1}")
 })
@@ -46,7 +46,7 @@ public class Contract {
     private String uploadId;
     private LocalDateTime uploadInitiatedAt;
 
-    private String teamId;
+    private String folderId;
     private String createdBy;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;

@@ -155,7 +155,7 @@ Includes all fields — suitable for the detail/editor view.
     { "id": "p2", "label": "Client",           "color": "#E24A4A", "order": 2 }
   ],
   "fileUploaded": false,
-  "teamId": "683a1f2c9d4e5b0087654321",
+  "folderId": "683a1f2c9d4e5b0087654321",
   "createdBy": "user@company.com",
   "createdAt": "2026-06-03T10:00:00",
   "updatedAt": "2026-06-03T10:00:00",
@@ -189,7 +189,7 @@ Includes all fields — suitable for the detail/editor view.
 | hasFormFields    | Boolean           | `true` if this contract has interactive PDF form fields                     |
 | parties          | List<Party>       | Signing parties assigned to this contract                                   |
 | fileUploaded     | Boolean           | `true` once a PDF has been successfully uploaded to MinIO                   |
-| teamId           | String            | Optional. ID of the team folder this contract belongs to                    |
+| folderId         | String            | Optional. ID of the folder this contract belongs to                         |
 | createdBy        | String            | Email of the owning user. Set from JWT — never from request body            |
 | createdAt        | DateTime          | Creation timestamp. Set by server                                           |
 | updatedAt        | DateTime          | Last modification timestamp. Set by server                                  |
@@ -224,7 +224,7 @@ Returned by `GET /contracts`. Lightweight — excludes heavy fields (`xfdfData`,
   "templateName": "Standard Service Agreement",
   "hasFormFields": true,
   "fileUploaded": false,
-  "teamId": "683a1f2c9d4e5b0087654321",
+  "folderId": "683a1f2c9d4e5b0087654321",
   "createdBy": "user@company.com",
   "createdAt": "2026-06-03T10:00:00",
   "updatedAt": "2026-06-03T10:00:00"
@@ -324,7 +324,7 @@ POST /contracts
   "category": "Services",
   "startDate": "2026-06-03",
   "endDate": "2027-06-03",
-  "teamId": "683a1f2c9d4e5b0087654321",
+  "folderId": "683a1f2c9d4e5b0087654321",
   "hasFormFields": true,
   "fieldValues": {
     "clientName": "Acme Corp",
@@ -353,7 +353,7 @@ POST /contracts
 | category         | String  | No       | Free-text category label. Max 50 chars.                                     |
 | startDate        | Date    | No       | `YYYY-MM-DD`. Defaults to today if omitted                                  |
 | endDate          | Date    | No       | `YYYY-MM-DD`. Must be ≥ startDate. Defaults to `startDate + 1 year`         |
-| teamId           | String  | No       | ID of the team to assign this contract to                                   |
+| folderId         | String  | No       | ID of the folder to assign this contract to                                 |
 | hasFormFields    | Boolean | No       | Pass `true` if the template has interactive PDF form fields                 |
 | fieldValues      | Object  | No       | Map of form field names to their filled values                              |
 | formFields       | Array   | No       | Full form field definitions from the template                               |
@@ -400,7 +400,7 @@ curl -X POST http://localhost:8080/contracts \
 
 ### 5.2 List Contracts
 
-Returns all contracts owned by the authenticated user, sorted by creation date descending (newest first). Supports optional filtering by team and/or status.
+Returns all contracts owned by the authenticated user, sorted by creation date descending (newest first). Supports optional filtering by folder and/or status.
 
 ```
 GET /contracts
@@ -416,7 +416,7 @@ GET /contracts
 
 | Parameter | Type   | Required | Description                                                              |
 |-----------|--------|----------|--------------------------------------------------------------------------|
-| teamId    | String | No       | Filter by team ID. Returns only contracts assigned to this team.         |
+| folderId  | String | No       | Filter by folder ID. Returns only contracts assigned to this folder.     |
 | status    | String | No       | Filter by status. Case-insensitive. Matches the value **stored in the database**. See [ContractStatus Enum](#44-contractstatus-enum). **Do not use `ACTIVE`, `EXPIRING`, or `EXPIRED` here** — these are computed values, never stored. Use `SIGNED` to retrieve all finalized contracts and filter client-side. |
 
 **Response — 200 OK**
@@ -438,10 +438,10 @@ curl -X GET http://localhost:8080/contracts \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
-**curl — Filter by team**
+**curl — Filter by folder**
 
 ```bash
-curl -X GET "http://localhost:8080/contracts?teamId=683a1f2c9d4e5b0087654321" \
+curl -X GET "http://localhost:8080/contracts?folderId=683a1f2c9d4e5b0087654321" \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
@@ -455,7 +455,7 @@ curl -X GET "http://localhost:8080/contracts?status=DRAFT" \
 **curl — Filter by both**
 
 ```bash
-curl -X GET "http://localhost:8080/contracts?teamId=683a1f2c9d4e5b0087654321&status=SIGNED" \
+curl -X GET "http://localhost:8080/contracts?folderId=683a1f2c9d4e5b0087654321&status=SIGNED" \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
@@ -536,7 +536,7 @@ Send only the fields you want to change. All fields are optional.
   "category": "Services",
   "startDate": "2026-06-03",
   "endDate": "2027-12-31",
-  "teamId": "683a1f2c9d4e5b0087654321",
+  "folderId": "683a1f2c9d4e5b0087654321",
   "xfdfData": "<xfdf>...</xfdf>",
   "fieldValues": { "contractValue": "15000" },
   "formFields": [],
@@ -1158,7 +1158,7 @@ Step 4   GET /contracts/{id}              (optional — verify termination)
 | fileUploaded flag | Set to `true` only after a successful single-shot upload or chunked complete. |
 | View URL guard | `GET /{id}/file/view-url` returns 400 if `fileUploaded` is `false`. |
 | PATCH semantics | Only fields present in the request body are updated. `null` values are ignored. |
-| teamId optional | Contracts can exist without a team (root level). |
+| folderId optional | Contracts can exist without a folder (root level). |
 
 ---
 
@@ -1179,7 +1179,7 @@ A background scheduler runs every day at **02:00 AM** to clean up abandoned chun
 | Method | Path                              | Auth Role     | Description                                         |
 |--------|-----------------------------------|---------------|-----------------------------------------------------|
 | POST   | `/contracts`                      | Authenticated | Create contract metadata                            |
-| GET    | `/contracts`                      | Authenticated | List contracts (filter by teamId and/or status)     |
+| GET    | `/contracts`                      | Authenticated | List contracts (filter by folderId and/or status)   |
 | GET    | `/contracts/{id}`                 | Authenticated | Get full contract detail                            |
 | PATCH  | `/contracts/{id}`                 | Authenticated | Partial update — metadata or xfdfData               |
 | PUT    | `/contracts/{id}/file`            | Authenticated | Single-shot file upload (< 30 MB only)              |

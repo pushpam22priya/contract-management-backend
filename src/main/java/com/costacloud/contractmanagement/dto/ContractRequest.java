@@ -41,5 +41,5 @@ public class ContractRequest {
     private boolean hasFormFields;
     private List<Party> parties;
 
-    private String teamId;
+    private String folderId;
 }

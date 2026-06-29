@@ -23,7 +23,7 @@ public class ContractListResponse {
     private String templateName;
     private boolean hasFormFields;
     private boolean fileUploaded;
-    private String teamId;
+    private String folderId;
     private String createdBy;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
@@ -65,7 +65,7 @@ public class ContractListResponse {
         this.templateName = c.getTemplateName();
         this.hasFormFields = c.isHasFormFields();
         this.fileUploaded = c.isFileUploaded();
-        this.teamId = c.getTeamId();
+        this.folderId = c.getFolderId();
         this.createdBy = c.getCreatedBy();
         this.createdAt = c.getCreatedAt();
         this.updatedAt = c.getUpdatedAt();
