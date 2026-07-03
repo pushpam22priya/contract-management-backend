@@ -26,6 +26,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -321,9 +322,18 @@ class ContractServiceCrudTest {
             return c;
         }
 
+        private Contract contractStub(String id, ContractStatus status) {
+            Contract c = new Contract();
+            c.setId(id);
+            c.setTitle("Contract " + id);
+            c.setCreatedBy(OWNER_EMAIL);
+            c.setStatus(status);
+            return c;
+        }
+
         @Test
-        @DisplayName("calls findByCreatedByOrderByCreatedAtDesc when no filters are provided")
-        void shouldCallNoFilter_repository_whenBothNull() {
+        @DisplayName("always calls findByCreatedByOrderByCreatedAtDesc regardless of filters")
+        void shouldAlwaysCall_findByCreatedBy_repository() {
             when(contractRepository.findByCreatedByOrderByCreatedAtDesc(OWNER_EMAIL))
                     .thenReturn(List.of(contractStub()));
 
@@ -333,45 +343,66 @@ class ContractServiceCrudTest {
         }
 
         @Test
-        @DisplayName("calls findByCreatedByAndTeamIdOrderByCreatedAtDesc when only teamId is provided")
-        void shouldCallTeamId_repository_whenStatusNull() {
-            when(contractRepository.findByCreatedByAndTeamIdOrderByCreatedAtDesc(OWNER_EMAIL, "team-1"))
-                    .thenReturn(List.of(contractStub()));
+        @DisplayName("filters by folderId in memory when folderId is provided")
+        void shouldFilter_byFolderId_inMemory() {
+            Contract match = contractStub("c-folder1", ContractStatus.DRAFT);
+            match.setFolderId("folder-1");
+            Contract noMatch = contractStub("c-folder2", ContractStatus.DRAFT);
+            noMatch.setFolderId("folder-2");
 
-            contractService.listContracts(OWNER_EMAIL, "team-1", null);
-
-            verify(contractRepository).findByCreatedByAndTeamIdOrderByCreatedAtDesc(OWNER_EMAIL, "team-1");
-        }
-
-        @Test
-        @DisplayName("calls findByCreatedByAndStatusOrderByCreatedAtDesc when only status is provided")
-        void shouldCallStatus_repository_whenTeamIdNull() {
-            when(contractRepository.findByCreatedByAndStatusOrderByCreatedAtDesc(
-                    OWNER_EMAIL, ContractStatus.DRAFT)).thenReturn(List.of(contractStub()));
-
-            contractService.listContracts(OWNER_EMAIL, null, "DRAFT");
-
-            verify(contractRepository).findByCreatedByAndStatusOrderByCreatedAtDesc(
-                    OWNER_EMAIL, ContractStatus.DRAFT);
-        }
-
-        @Test
-        @DisplayName("calls findByCreatedByAndTeamIdAndStatusOrderByCreatedAtDesc when both filters are provided")
-        void shouldCallBothFilters_repository_whenBothProvided() {
-            when(contractRepository.findByCreatedByAndTeamIdAndStatusOrderByCreatedAtDesc(
-                    OWNER_EMAIL, "team-1", ContractStatus.DRAFT)).thenReturn(List.of(contractStub()));
-
-            contractService.listContracts(OWNER_EMAIL, "team-1", "DRAFT");
-
-            verify(contractRepository).findByCreatedByAndTeamIdAndStatusOrderByCreatedAtDesc(
-                    OWNER_EMAIL, "team-1", ContractStatus.DRAFT);
-        }
-
-        @Test
-        @DisplayName("returns a list of ContractListResponse — one per matching contract")
-        void shouldReturn_listOfContractListResponse() {
             when(contractRepository.findByCreatedByOrderByCreatedAtDesc(OWNER_EMAIL))
-                    .thenReturn(List.of(contractStub(), contractStub()));
+                    .thenReturn(List.of(match, noMatch));
+
+            List<ContractListResponse> result =
+                    contractService.listContracts(OWNER_EMAIL, "folder-1", null);
+
+            assertEquals(1, result.size());
+        }
+
+        @Test
+        @DisplayName("filters by effective status in memory when status is provided")
+        void shouldFilter_byEffectiveStatus_inMemory() {
+            Contract draft = contractStub("c-draft", ContractStatus.DRAFT);
+
+            Contract signed = contractStub("c-signed", ContractStatus.SIGNED);
+            signed.setStartDate(LocalDate.now().minusYears(1));
+            signed.setEndDate(LocalDate.now().plusYears(1)); // effective = ACTIVE
+
+            when(contractRepository.findByCreatedByOrderByCreatedAtDesc(OWNER_EMAIL))
+                    .thenReturn(List.of(draft, signed));
+
+            List<ContractListResponse> result =
+                    contractService.listContracts(OWNER_EMAIL, null, "DRAFT");
+
+            assertEquals(1, result.size());
+        }
+
+        @Test
+        @DisplayName("applies both folderId and effective-status filters when both are provided")
+        void shouldApplyBothFilters_inMemory() {
+            Contract match = contractStub("c-match", ContractStatus.DRAFT);
+            match.setFolderId("folder-1");
+
+            Contract wrongFolder = contractStub("c-wrong-folder", ContractStatus.DRAFT);
+            wrongFolder.setFolderId("folder-2");
+
+            when(contractRepository.findByCreatedByOrderByCreatedAtDesc(OWNER_EMAIL))
+                    .thenReturn(List.of(match, wrongFolder));
+
+            List<ContractListResponse> result =
+                    contractService.listContracts(OWNER_EMAIL, "folder-1", "DRAFT");
+
+            assertEquals(1, result.size());
+        }
+
+        @Test
+        @DisplayName("returns a list of ContractListResponse — one per visible contract")
+        void shouldReturn_listOfContractListResponse() {
+            Contract c1 = contractStub("c-1", ContractStatus.DRAFT);
+            Contract c2 = contractStub("c-2", ContractStatus.DRAFT);
+
+            when(contractRepository.findByCreatedByOrderByCreatedAtDesc(OWNER_EMAIL))
+                    .thenReturn(List.of(c1, c2));
 
             List<ContractListResponse> result =
                     contractService.listContracts(OWNER_EMAIL, null, null);
@@ -392,15 +423,12 @@ class ContractServiceCrudTest {
         }
 
         @Test
-        @DisplayName("status filter is case-insensitive — 'draft' and 'DRAFT' both resolve to the enum")
+        @DisplayName("status filter is case-insensitive — 'draft' resolves the same as 'DRAFT'")
         void shouldResolveStatus_caseInsensitive() {
-            when(contractRepository.findByCreatedByAndStatusOrderByCreatedAtDesc(
-                    OWNER_EMAIL, ContractStatus.DRAFT)).thenReturn(List.of());
+            when(contractRepository.findByCreatedByOrderByCreatedAtDesc(OWNER_EMAIL))
+                    .thenReturn(List.of());
 
             assertDoesNotThrow(() -> contractService.listContracts(OWNER_EMAIL, null, "draft"));
-
-            verify(contractRepository).findByCreatedByAndStatusOrderByCreatedAtDesc(
-                    OWNER_EMAIL, ContractStatus.DRAFT);
         }
 
         @Test
@@ -408,6 +436,41 @@ class ContractServiceCrudTest {
         void shouldThrow_whenUnknownStatus() {
             assertThrows(IllegalArgumentException.class,
                     () -> contractService.listContracts(OWNER_EMAIL, null, "INVALID_STATUS"));
+        }
+
+        @Test
+        @DisplayName("suppresses the original when its renewedContractId points to an existing contract in the list")
+        void shouldSuppress_original_whenRenewalExistsInList() {
+            Contract original = contractStub("orig-01", ContractStatus.SIGNED);
+            original.setEndDate(LocalDate.now().minusDays(1)); // effective EXPIRED
+            original.setRenewedContractId("renewal-01");
+
+            Contract renewal = contractStub("renewal-01", ContractStatus.DRAFT);
+
+            when(contractRepository.findByCreatedByOrderByCreatedAtDesc(OWNER_EMAIL))
+                    .thenReturn(List.of(original, renewal));
+
+            List<ContractListResponse> result =
+                    contractService.listContracts(OWNER_EMAIL, null, null);
+
+            // Only the renewal is shown; original is suppressed
+            assertEquals(1, result.size());
+        }
+
+        @Test
+        @DisplayName("does NOT suppress a contract when its renewedContractId references an ID not in the list")
+        void shouldNotSuppress_whenRenewalNotInList() {
+            Contract original = contractStub("orig-01", ContractStatus.SIGNED);
+            original.setEndDate(LocalDate.now().minusDays(1));
+            original.setRenewedContractId("renewal-unknown"); // not returned by the repo
+
+            when(contractRepository.findByCreatedByOrderByCreatedAtDesc(OWNER_EMAIL))
+                    .thenReturn(List.of(original)); // renewal is absent
+
+            List<ContractListResponse> result =
+                    contractService.listContracts(OWNER_EMAIL, null, null);
+
+            assertEquals(1, result.size());
         }
     }
 

@@ -95,6 +95,7 @@ public class Template {
         private String label;
         private String color;
         private int order;
+        private PartyType type;
 
         public String getId() { return id; }
         public void setId(String id) { this.id = id; }
@@ -104,6 +105,14 @@ public class Template {
         public void setColor(String color) { this.color = color; }
         public int getOrder() { return order; }
         public void setOrder(int order) { this.order = order; }
+
+        public PartyType getType() {
+            return type;
+        }
+
+        public void setType(PartyType type) {
+            this.type = type;
+        }
     }
 
     public String getId() { return id; }

@@ -8,4 +8,6 @@ public class Party {
     private String label;
     private String color;
     private int order;
+    private PartyType type; // INTERNAL or EXTERNAL — null treated as INTERNAL (backward compat)
+
 }

@@ -28,8 +28,10 @@ import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -90,7 +92,7 @@ public class ContractService {
         contract.setFormFields(request.getFormFields());
         contract.setHasFormFields(request.isHasFormFields());
         contract.setParties(request.getParties());
-        contract.setTeamId(request.getTeamId());
+        contract.setFolderId(request.getFolderId());
         contract.setCreatedBy(email);
         contract.setFileUploaded(false);
         contract.setCreatedAt(LocalDateTime.now());
@@ -102,22 +104,52 @@ public class ContractService {
 
     // ─── List ────────────────────────────────────────────────────
 
-    public List<ContractListResponse> listContracts(String email, String teamId, String status) {
-        List<Contract> contracts;
-
-        if (teamId != null && status != null) {
-            contracts = contractRepository.findByCreatedByAndTeamIdAndStatusOrderByCreatedAtDesc(
-                    email, teamId, ContractStatus.valueOf(status.toUpperCase()));
-        } else if (teamId != null) {
-            contracts = contractRepository.findByCreatedByAndTeamIdOrderByCreatedAtDesc(email, teamId);
-        } else if (status != null) {
-            contracts = contractRepository.findByCreatedByAndStatusOrderByCreatedAtDesc(
-                    email, ContractStatus.valueOf(status.toUpperCase()));
-        } else {
-            contracts = contractRepository.findByCreatedByOrderByCreatedAtDesc(email);
+    public List<ContractListResponse> listContracts(String email, String folderId, String status) {
+        // Validate status enum early so unknown values throw IAE before doing any DB work
+        ContractStatus requestedStatus = null;
+        if (status != null) {
+            requestedStatus = ContractStatus.valueOf(status.toUpperCase());
         }
 
-        return contracts.stream()
+        // Fetch all owner contracts — required to build the suppression map correctly
+        List<Contract> all = contractRepository.findByCreatedByOrderByCreatedAtDesc(email);
+
+        // Chain suppression: hide contracts that have been superseded by a renewal.
+        // A contract is suppressed when its renewedContractId points to another contract
+        // that also belongs to this owner (i.e., the renewal exists in this list).
+        Set<String> allIds = new HashSet<>();
+        for (Contract c : all) allIds.add(c.getId());
+
+        Set<String> suppressedIds = new HashSet<>();
+        for (Contract c : all) {
+            if (c.getRenewedContractId() != null && allIds.contains(c.getRenewedContractId())) {
+                suppressedIds.add(c.getId());
+            }
+        }
+
+        List<Contract> visible = new ArrayList<>();
+        for (Contract c : all) {
+            if (!suppressedIds.contains(c.getId())) visible.add(c);
+        }
+
+        // Apply folderId filter in memory
+        if (folderId != null) {
+            String f = folderId;
+            visible = visible.stream()
+                    .filter(c -> f.equals(c.getFolderId()))
+                    .collect(Collectors.toList());
+        }
+
+        // Apply status filter using effective status (mirrors ContractListResponse logic)
+        if (requestedStatus != null) {
+            ContractStatus rs = requestedStatus;
+            return visible.stream()
+                    .map(ContractListResponse::new)
+                    .filter(r -> r.getStatus() == rs)
+                    .collect(Collectors.toList());
+        }
+
+        return visible.stream()
                 .map(ContractListResponse::new)
                 .collect(Collectors.toList());
     }
@@ -167,7 +199,7 @@ public class ContractService {
         if (request.getFieldValues() != null) contract.setFieldValues(request.getFieldValues());
         if (request.getFormFields() != null) mergeFormFieldsSafe(contract, request.getFormFields());
         if (request.getParties() != null) contract.setParties(request.getParties());
-        if (request.getTeamId() != null) contract.setTeamId(request.getTeamId());
+        if (request.getFolderId() != null) contract.setFolderId(request.getFolderId());
 
         contract.setUpdatedAt(LocalDateTime.now());
         contractRepository.save(contract);

@@ -294,11 +294,16 @@ public class SignatureService {
 
                 String signingUrl  = baseUrl + "/sign/" + ext.getToken();
                 String partyColor = resolvePartyColor(contract, ext.getPartyId());
-                emailService.sendSignatureRequestEmail(
-                        ext.getEmail(), ext.getName(), senderName, callerEmail,
-                        contract.getTitle(), signingUrl, sr.getExpiresAt(),
-                        ext.getPartyLabel(), partyColor
-                );
+                try {
+                    emailService.sendSignatureRequestEmail(
+                            ext.getEmail(), ext.getName(), senderName, callerEmail,
+                            contract.getTitle(), signingUrl, sr.getExpiresAt(),
+                            ext.getPartyLabel(), partyColor
+                    );
+                } catch (RuntimeException emailEx) {
+                    log.error("SIGNATURE EMAIL NOT SENT — contract={}, signer={}: {}",
+                            contractId, ext.getEmail(), emailEx.getMessage());
+                }
             }
         }
 

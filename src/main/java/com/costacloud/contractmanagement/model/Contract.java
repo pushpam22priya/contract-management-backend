@@ -83,6 +83,14 @@ public class Contract {
     private String signedPdfKey;    // contracts/{id}_signed.pdf — updated after each signer
     private String finalPdfKey;     // contracts/{id}_final.pdf  — set on finalization
 
+    // ─── Unified Workflow (new flow) ──────────────────────────
+    private List<WorkflowParticipant> participants;
+    private Integer currentParticipantOrder;
+    private boolean externalSigningIncluded;
+    // Stored at submit time; consumed automatically when last approver completes
+    private List<com.costacloud.contractmanagement.dto.ExternalSignerAssignment> pendingExternalSigners;
+    private String flowSenderName;
+
     // ─── Termination ──────────────────────────────────────────────
     private LocalDateTime terminatedAt;
     private String terminatedBy;

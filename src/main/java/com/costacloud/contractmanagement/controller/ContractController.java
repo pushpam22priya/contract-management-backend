@@ -1,6 +1,7 @@
 package com.costacloud.contractmanagement.controller;
 
 import com.costacloud.contractmanagement.dto.*;
+import com.costacloud.contractmanagement.service.ContractRenewalService;
 import com.costacloud.contractmanagement.service.ContractService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
@@ -24,9 +25,12 @@ import java.util.Map;
 public class ContractController {
 
     private final ContractService contractService;
+    private final ContractRenewalService contractRenewalService;
 
-    public ContractController(ContractService contractService) {
+    public ContractController(ContractService contractService,
+                              ContractRenewalService contractRenewalService) {
         this.contractService = contractService;
+        this.contractRenewalService = contractRenewalService;
     }
 
     // ─── Metadata Endpoints ──────────────────────────────────────
@@ -40,13 +44,13 @@ public class ContractController {
                 .body(contractService.createContract(request, getEmail()));
     }
 
-    @Operation(summary = "List contracts for current user — filter by teamId and/or status")
+    @Operation(summary = "List contracts for current user — filter by folderId and/or status")
     @SecurityRequirement(name = "bearerAuth")
     @GetMapping
     public ResponseEntity<List<ContractListResponse>> listContracts(
-            @RequestParam(required = false) String teamId,
+            @RequestParam(required = false) String folderId,
             @RequestParam(required = false) String status) {
-        return ResponseEntity.ok(contractService.listContracts(getEmail(), teamId, status));
+        return ResponseEntity.ok(contractService.listContracts(getEmail(), folderId, status));
     }
 
     @Operation(summary = "Get full contract including xfdfData and formFields")
@@ -146,6 +150,34 @@ public class ContractController {
     @PostMapping("/{id}/terminate")
     public ResponseEntity<TerminationResponse> terminateContract(@PathVariable String id) {
         return ResponseEntity.ok(contractService.terminateContract(id, getEmail()));
+    }
+
+    // ─── Renewal Endpoints ────────────────────────────────────────
+
+    @Operation(
+        summary = "Create a renewal draft for an EXPIRING or EXPIRED contract",
+        description = "Creates a renewal draft linked to the original. The original is not updated " +
+                      "until the user calls confirm-renewal after uploading the filled PDF. " +
+                      "Idempotent: returns the existing draft if one was already started.")
+    @SecurityRequirement(name = "bearerAuth")
+    @PostMapping("/{id}/renew")
+    public ResponseEntity<ContractResponse> createRenewal(
+            @PathVariable String id,
+            @Valid @RequestBody RenewalRequest request) {
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(contractRenewalService.createRenewal(id, request, getEmail()));
+    }
+
+    @Operation(
+        summary = "Confirm a renewal — marks the original contract as renewed",
+        description = "Call this after uploading the renewal PDF. Links the original contract to " +
+                      "this renewal draft and sets renewalStatus=in_progress on the original. " +
+                      "Idempotent: safe to call twice.")
+    @SecurityRequirement(name = "bearerAuth")
+    @PostMapping("/{id}/confirm-renewal")
+    public ResponseEntity<Void> confirmRenewal(@PathVariable String id) {
+        contractRenewalService.confirmRenewal(id, getEmail());
+        return ResponseEntity.ok().build();
     }
 
 

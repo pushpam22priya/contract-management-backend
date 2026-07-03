@@ -3,6 +3,8 @@ package com.costacloud.contractmanagement.scheduler;
 import com.costacloud.contractmanagement.config.CustomMinioClient;
 import com.costacloud.contractmanagement.model.Contract;
 import com.costacloud.contractmanagement.model.Template;
+import com.costacloud.contractmanagement.repository.ContractRepository;
+import com.costacloud.contractmanagement.service.ContractRenewalService;
 import com.costacloud.contractmanagement.service.ContractService;
 import com.costacloud.contractmanagement.service.TemplateService;
 import org.slf4j.Logger;
@@ -21,6 +23,8 @@ public class UploadCleanupScheduler {
 
     private final TemplateService templateService;
     private final ContractService contractService;
+    private final ContractRenewalService contractRenewalService;
+    private final ContractRepository contractRepository;
     private final CustomMinioClient customMinioClient;
 
     @Value("${minio.bucket-name}")
@@ -28,9 +32,13 @@ public class UploadCleanupScheduler {
 
     public UploadCleanupScheduler(TemplateService templateService,
                                   ContractService contractService,
+                                  ContractRenewalService contractRenewalService,
+                                  ContractRepository contractRepository,
                                   CustomMinioClient customMinioClient) {
         this.templateService = templateService;
         this.contractService = contractService;
+        this.contractRenewalService = contractRenewalService;
+        this.contractRepository = contractRepository;
         this.customMinioClient = customMinioClient;
     }
 
@@ -70,6 +78,27 @@ public class UploadCleanupScheduler {
                 log.info("Cleaned orphaned contract upload: {}", contract.getId());
             } catch (Exception e) {
                 log.warn("Failed to clean contract {}: {}", contract.getId(), e.getMessage());
+            }
+        }
+
+        // ── Renewal drafts: abort any in-progress upload + delete the document ─
+        // A renewal draft is orphaned when the user started a renewal (renewedFromId set)
+        // but never uploaded the PDF — the original contract remains untouched so
+        // the Renew button reappears naturally.
+        List<Contract> orphanedRenewals = contractRenewalService.findOrphanedRenewalDrafts(cutoff);
+        for (Contract renewal : orphanedRenewals) {
+            try {
+                if (renewal.getUploadId() != null) {
+                    customMinioClient.cancelMultipartUpload(
+                            bucketName,
+                            "contracts/" + renewal.getId() + ".pdf",
+                            renewal.getUploadId()
+                    );
+                }
+                contractRepository.deleteById(renewal.getId());
+                log.info("Cleaned orphaned renewal draft: {}", renewal.getId());
+            } catch (Exception e) {
+                log.warn("Failed to clean renewal draft {}: {}", renewal.getId(), e.getMessage());
             }
         }
     }

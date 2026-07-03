@@ -155,17 +155,22 @@ public class AutoAdvanceService {
 
                         String signingUrl  = baseUrl + "/sign/" + s.getToken();
                         String partyColor = resolvePartyColor(contract, s.getPartyId());
-                        emailService.sendSignatureRequestEmail(
-                                s.getEmail(),
-                                s.getName(),
-                                senderName,
-                                contract.getCreatedBy(),
-                                contract.getTitle(),
-                                signingUrl,
-                                null,
-                                s.getPartyLabel(),
-                                partyColor
-                        );
+                        try {
+                            emailService.sendSignatureRequestEmail(
+                                    s.getEmail(),
+                                    s.getName(),
+                                    senderName,
+                                    contract.getCreatedBy(),
+                                    contract.getTitle(),
+                                    signingUrl,
+                                    null,
+                                    s.getPartyLabel(),
+                                    partyColor
+                            );
+                        } catch (RuntimeException emailEx) {
+                            log.error("SIGNATURE EMAIL NOT SENT — contract={}, signer={}: {}",
+                                    contractId, s.getEmail(), emailEx.getMessage());
+                        }
                     });
 
             log.info("Contract {} — advanced to order {}", contractId, advanceTo);

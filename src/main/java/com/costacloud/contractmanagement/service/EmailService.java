@@ -70,7 +70,8 @@ public class EmailService {
             mailSender.send(message);
 
         } catch (MailException | jakarta.mail.MessagingException e) {
-            log.error("Failed to send signature request email to {}: {}", toEmail, e.getMessage());
+            log.error("Failed to send signature request email to {}: {}", toEmail, e.getMessage(), e);
+            throw new RuntimeException("Email delivery failed for " + toEmail + ": " + e.getMessage(), e);
         }
     }
 

@@ -13,5 +13,6 @@ public enum ContractStatus {
     EXPIRED,
     TERMINATED,
     REJECTED_BY_REVIEWER,
-    REJECTED_BY_APPROVER
+    REJECTED_BY_APPROVER,
+    REJECTED
 }
