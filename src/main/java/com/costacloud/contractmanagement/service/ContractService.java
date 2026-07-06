@@ -166,12 +166,12 @@ public class ContractService {
         Contract contract = findByIdAndOwner(id, email);
 
         ContractStatus s = contract.getStatus();
-        if (s == ContractStatus.IN_REVIEW
-                || s == ContractStatus.IN_APPROVAL
-                || s == ContractStatus.READY_FOR_SIGNATURE) {
-            throw new BadRequestException(
-                    "Contract cannot be edited while it is " + s.name().toLowerCase().replace("_", " ")
-            );
+        if (s == ContractStatus.SIGNED
+                || s == ContractStatus.ACTIVE
+                || s == ContractStatus.EXPIRING
+                || s == ContractStatus.EXPIRED
+                || s == ContractStatus.TERMINATED) {
+            throw new BadRequestException("Contract cannot be edited after it has been finalized");
         }
 
         if (request.getTitle() != null) {

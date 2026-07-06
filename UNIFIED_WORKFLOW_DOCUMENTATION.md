@@ -1,7 +1,7 @@
 # Unified Workflow — Technical Documentation
 
-**Version:** 1.0.0
-**Last Updated:** 2026-06-30
+**Version:** 2.0.0
+**Last Updated:** 2026-07-06
 **Base URL:** `http://localhost:8080`
 **Status:** Production Ready
 
@@ -19,11 +19,13 @@
 8. [API Reference](#8-api-reference)
 9. [Multipart PDF Upload Guide](#9-multipart-pdf-upload-guide)
 10. [Org-Field Gate](#10-org-field-gate)
-11. [Resubmission After Rejection](#11-resubmission-after-rejection)
-12. [Error Reference](#12-error-reference)
-13. [End-to-End Integration Walkthrough](#13-end-to-end-integration-walkthrough)
-14. [Frontend Integration Guide](#14-frontend-integration-guide)
-15. [Test Coverage](#15-test-coverage)
+11. [External Signing — Auto-Trigger vs Manual](#11-external-signing--auto-trigger-vs-manual)
+12. [Resubmission After Rejection](#12-resubmission-after-rejection)
+13. [Email Delivery & Error Handling](#13-email-delivery--error-handling)
+14. [Error Reference](#14-error-reference)
+15. [End-to-End Integration Walkthrough](#15-end-to-end-integration-walkthrough)
+16. [Frontend Integration Guide](#16-frontend-integration-guide)
+17. [Test Coverage](#17-test-coverage)
 
 ---
 
@@ -31,22 +33,24 @@
 
 ### 1.1 What Is the Unified Workflow?
 
-The Unified Workflow is a **new, parallel service** that merges the internal review, internal approval (with PDF signing), and optional external client signing into a **single sequential chain**. It replaces the need to run separate review → approval → signature flows in disconnected steps.
+The Unified Workflow is a **new, parallel service** that merges internal review, internal approval, and optional external client signing into a **single sequential chain**. It replaces the need to run separate review → approval → signature flows in disconnected steps.
 
 The key distinction from the legacy `ContractWorkflowService`:
 - **Legacy flow**: Review, Approval, and Signature were three separate, loosely-coupled processes.
-- **Unified flow**: All internal participants (reviewers and approvers) are assigned upfront with a global sequential order. After all internal work is done the contract automatically advances to `READY_FOR_SIGNATURE` and the owner triggers external signing in one action.
+- **Unified flow**: All internal participants (reviewers and approvers) are assigned upfront with a global sequential order. Each participant — reviewer or approver — edits the PDF and uploads it when completing their step. After all internal work is done the contract automatically advances.
 
 ### 1.2 What the System Does
 
 - Assigns a sequential list of **reviewers** and **approvers** to a contract in a single submit call
 - Unlocks each participant only after all participants at the previous order number have completed
-- Reviewers **read and edit** org-party form fields, then mark complete (no PDF upload)
-- Approvers **upload a digitally-signed PDF** to mark their approval — each approver's signature is cumulative (one `_signed.pdf` file, overwritten after each approval)
-- On rejection, the contract returns to `REJECTED`; the owner can resubmit with corrected participants
+- **Both reviewers and approvers** edit org-party form fields, upload the modified PDF, and mark complete — the upload flow is identical for both roles
+- Each participant's upload overwrites the same `_signed.pdf` key — the next participant always works from the most recent version
+- On rejection, the contract returns to `REJECTED`; the owner can resubmit
 - After all internal participants are done, the contract moves to `READY_FOR_SIGNATURE`
-- The owner may then send the contract for **external signature** (optional) after validating that all org-owned form fields are filled (org-gate)
+- **When `externalSigningIncluded = true`**: External signing is auto-triggered immediately after the last approver completes — no manual action needed. The `externalSigners` list provided at submit time is used automatically.
+- **When `externalSigningIncluded = false`**: Contract reaches `READY_FOR_SIGNATURE` and the owner manually calls `POST /flow/send-for-signature` when ready
 - Provides an **inbox endpoint** so reviewers and approvers see only contracts where it is currently their turn
+- Provides a **sent endpoint** so reviewers and approvers can view contracts they have already completed (read-only)
 
 ### 1.3 What This Service Does NOT Replace
 
@@ -62,18 +66,22 @@ The unified workflow was implemented with a strict **additive-only policy** on s
 
 | File | Type of Change |
 |---|---|
-| `Contract.java` | 3 new fields added — zero fields removed or renamed |
+| `Contract.java` | 5 new fields added — zero fields removed or renamed |
 | `ContractStatus.java` | `REJECTED` value added |
 | `Party.java` | `type` field added (null = INTERNAL, backward compatible) |
 | `Template.java` (inner Party) | `type` field added |
 | `ContractRepository.java` | 1 new query method added |
 | `ContractRenewalService.java` | 1 line added in `convertParties()` |
+| `EmailService.java` | Email exceptions now rethrow — callers handle gracefully |
+| `SignatureService.java` | Email exceptions caught per-signer — signing flow is never blocked |
+| `AutoAdvanceService.java` | Email exceptions caught per-signer |
 
 All net-new files:
 - `model/PartyType.java`
 - `model/ParticipantRole.java`
 - `model/WorkflowParticipant.java`
 - `dto/ParticipantAssignment.java`
+- `dto/ExternalSignerAssignment.java`
 - `dto/FlowSubmitRequest.java`
 - `dto/FlowFieldEditRequest.java`
 - `dto/FlowCompleteRequest.java`
@@ -99,19 +107,33 @@ When a participant marks complete:
 
 ### 2.3 PDF Versioning Strategy
 
-Approvers sign the contract PDF progressively. A single MinIO object key is used and **overwritten** after each approver completes:
+Every participant — reviewer and approver — uploads the PDF when completing their step. A single MinIO object key is used and **overwritten** after each participant completes:
 
 ```
 contracts/{contractId}_signed.pdf
 ```
 
-This is safe because approvers are unlocked **sequentially** — Approver 2 is never unlocked until Approver 1 has fully completed and their PDF is committed. There are no concurrent writes to the same key.
+This is safe because participants are unlocked **sequentially** — Participant at order 2 is never unlocked until Participant at order 1 has fully completed and their PDF is committed. There are no concurrent writes to the same key.
 
 The `getParticipantFileUrl` endpoint always returns the **latest available version**: if `_signed.pdf` exists in MinIO, it is returned; otherwise the original `contracts/{contractId}.pdf` is returned. This ensures each participant always reads the most up-to-date state.
 
+After the multipart upload completes in `markComplete()`, `contract.fileUploaded` is also set to `true`. This guarantees the downstream signature flow's file-check always passes for contracts going through the unified flow.
+
 ### 2.4 Optimistic Locking
 
-After each approver completes their PDF upload, `contract.version` is incremented. This version is also synced to any pending `SignatureRequest` documents in MongoDB so that the external signing flow (if triggered later) operates on the correct version.
+After each **approver** completes their PDF upload, `contract.version` is incremented. This version is also synced to any pending `SignatureRequest` documents in MongoDB so that the external signing flow operates on the correct version. Reviewer completions do not increment the version.
+
+### 2.5 Auto-Trigger External Signing
+
+When `externalSigningIncluded = true` and the last approver marks complete:
+
+1. `markComplete()` saves the contract at `READY_FOR_SIGNATURE` to MongoDB
+2. `triggerAutoExternalSigning()` is called immediately after
+3. It builds `SignerAssignmentDto` objects from `contract.pendingExternalSigners` (stored at submit time)
+4. Calls `signatureService.submitForSignature()` which saves the contract as `IN_SIGNATURE` and sends emails
+5. The contract is **reloaded from DB** and the `IN_SIGNATURE` state is returned in the `markComplete` response
+
+If the auto-trigger fails for any reason (e.g., SMTP error), the failure is logged prominently but the API still returns 200. The contract DB state at that point is whatever was last saved — either `IN_SIGNATURE` (signing triggered but email failed) or `READY_FOR_SIGNATURE` (trigger failed before signing). The owner can fall back to calling `POST /flow/send-for-signature` manually.
 
 ---
 
@@ -129,21 +151,22 @@ The JWT subject is the user's email address. Spring Security extracts the email 
 
 | Action | Who Can Call |
 |---|---|
-| `submit` | Contract owner (createdBy) only |
-| `saveFieldEdits` | Active participant (unlocked or in_progress) only |
-| `markComplete` | Active participant (unlocked or in_progress) only |
-| `reject` | Active participant (unlocked or in_progress) only |
-| `initiateUpload` | Active APPROVER only, while status is IN_APPROVAL |
-| `getPresignedPartUrl` | Active APPROVER only, while status is IN_APPROVAL |
-| `abortUpload` | Active APPROVER only, while status is IN_APPROVAL |
+| `submit` | Contract owner (`createdBy`) only |
+| `saveFieldEdits` | Active participant (`unlocked` or `in_progress`) only |
+| `markComplete` | Active participant (`unlocked` or `in_progress`) only |
+| `reject` | Active participant (`unlocked` or `in_progress`) only |
+| `initiateUpload` | Active participant (reviewer OR approver), while status is IN_REVIEW or IN_APPROVAL |
+| `getPresignedPartUrl` | Active participant (reviewer OR approver), while status is IN_REVIEW or IN_APPROVAL |
+| `abortUpload` | Active participant (reviewer OR approver), while status is IN_REVIEW or IN_APPROVAL |
 | `getParticipantFileUrl` | Contract owner OR any participant (any status) |
-| `sendForSignature` | Contract owner only, while status is READY_FOR_SIGNATURE |
+| `sendForSignature` | Contract owner only, while status is `READY_FOR_SIGNATURE` |
 | `getFlowStatus` | Contract owner OR any participant |
 | `getFlowInbox` | Any authenticated user (filtered to caller's active tasks) |
+| `getFlowSent` | Any authenticated user (filtered to caller's completed contracts) |
 
 ### 3.2 Ownership Masking
 
-Non-owner access to `submit` and `sendForSignature` returns **404 Not Found** instead of 403 Forbidden. This prevents contract ID enumeration — an attacker cannot tell whether a contract exists if they are not the owner.
+Non-owner access to `submit` and `sendForSignature` returns **404 Not Found** instead of 403 Forbidden. This prevents contract ID enumeration.
 
 ---
 
@@ -160,8 +183,8 @@ A participant is any internal user (reviewer or approver) assigned to a contract
 
 ```
 pending      — assigned but not yet the active order; cannot take any action
-unlocked     — it is this participant's turn; can edit fields and complete/reject
-in_progress  — has saved at least one field edit; can still complete/reject
+unlocked     — it is this participant's turn; can edit fields, upload PDF, and complete/reject
+in_progress  — has saved at least one field edit; can still upload and complete/reject
 completed    — marked the workflow step complete; cannot undo
 rejected     — rejected the contract; workflow stops, contract goes to REJECTED
 ```
@@ -170,13 +193,14 @@ rejected     — rejected the contract; workflow stops, contract goes to REJECTE
 
 | Role | Can Edit Fields | Must Upload PDF | Can Reject |
 |---|---|---|---|
-| `REVIEWER` | Yes | No — uploading a PDF is an error | Yes |
-| `APPROVER` | Yes | Yes — PDF is required to mark complete | Yes |
+| `REVIEWER` | Yes | **Yes — PDF upload is required to mark complete** | Yes |
+| `APPROVER` | Yes | **Yes — PDF upload is required to mark complete** | Yes |
+
+Both roles follow the **identical** upload flow: initiate multipart upload → presign chunk URLs → PUT chunks to MinIO → call `markComplete` with `uploadId` + `parts`.
 
 ### 4.4 Global Ordering
 
-Order numbers are **global** — they do not reset per role. All reviewer orders **must** be lower than all approver orders. You cannot have:
-- A reviewer at order 3 and an approver at order 2 (reviewers must all come first)
+Order numbers are **global** — they do not reset per role. All reviewer orders **must** be lower than all approver orders.
 
 Valid example:
 ```
@@ -197,13 +221,16 @@ A `null` type is treated as `INTERNAL` for backward compatibility.
 
 ### 4.6 externalSigningIncluded
 
-A boolean flag set at submit time. When `true`:
-- The owner must fill all `INTERNAL` party form fields before `sendForSignature` is allowed (org-gate)
-- External signing is expected after the internal flow completes
+A boolean flag set at submit time that controls the post-approval path.
 
-When `false`:
-- Org-gate is not enforced
-- The contract still goes to `READY_FOR_SIGNATURE` when internal participants finish, but the owner controls what happens next
+| Value | Behavior after last approver completes |
+|---|---|
+| `true` | External signing is **auto-triggered** using the `externalSigners` list stored at submit time. The owner does not need to do anything. |
+| `false` | Contract reaches `READY_FOR_SIGNATURE`. The owner manually calls `POST /flow/send-for-signature` when ready. |
+
+When `true`, the `externalSigners` list is **required** at submit time. When `false`, no external signers need to be provided at submit.
+
+In both cases, only `type: "external"` signers are accepted in the signature flow.
 
 ---
 
@@ -217,37 +244,42 @@ When `false`:
 | `REJECTED` | A reviewer or approver rejected the contract — eligible for resubmission |
 | `IN_REVIEW` | Current active participants are REVIEWERs |
 | `IN_APPROVAL` | Current active participants are APPROVERs |
-| `READY_FOR_SIGNATURE` | All internal participants completed — owner may trigger external signing |
+| `READY_FOR_SIGNATURE` | All internal participants completed — auto-trigger pending, or owner may call send-for-signature |
+| `IN_SIGNATURE` | External signing in progress (managed by SignatureService) |
 
 ### 5.2 State Transition Diagram
 
 ```
-                      ┌─────────────────────────────────────────────────────┐
-                      │                  OWNER: submit()                    │
-                      ▼                                                     │
- ┌──────────┐   first role = REVIEWER   ┌───────────┐                      │
- │  DRAFT   │ ─────────────────────────▶│ IN_REVIEW │                      │
- └──────────┘                           └─────┬─────┘                      │
-      │                                       │                             │
-      │  first role = APPROVER                │ all reviewers complete      │
-      │                                       ▼                             │
-      │                               ┌─────────────┐                      │
-      └──────────────────────────────▶│ IN_APPROVAL │                      │
-                                      └──────┬──────┘                      │
-                                             │                             │
-                          ┌──────────────────┤                             │
-                          │ any participant  │ all approvers complete      │
-                          │ rejects          ▼                             │
-                          │        ┌────────────────────┐                  │
-                          │        │ READY_FOR_SIGNATURE│                  │
-                          ▼        └────────────────────┘                  │
-                    ┌──────────┐           │                               │
-                    │ REJECTED │           │ owner: sendForSignature()     │
-                    └──────────┘           ▼                               │
-                          │         (External Signing Flow)                │
-                          │                                                 │
-                          └─────────────────────────────────────────────────┘
-                                 OWNER: submit() again (resubmit)
+                      ┌────────────────────────────────────────────────────────┐
+                      │                  OWNER: submit()                       │
+                      ▼                                                        │
+ ┌──────────┐   first role = REVIEWER   ┌───────────┐                         │
+ │  DRAFT   │ ────────────────────────▶│ IN_REVIEW │                         │
+ └──────────┘                          └─────┬─────┘                         │
+      │                                      │                                │
+      │  first role = APPROVER               │ all reviewers complete         │
+      │                                      ▼                                │
+      │                              ┌─────────────┐                         │
+      └─────────────────────────────▶│ IN_APPROVAL │                         │
+                                     └──────┬──────┘                         │
+                                            │                                 │
+                         ┌──────────────────┤                                 │
+                         │ any participant  │ all approvers complete          │
+                         │ rejects          ▼                                 │
+                         │       ┌────────────────────┐                       │
+                         │       │ READY_FOR_SIGNATURE│                       │
+                         ▼       └────────┬─────┬─────┘                       │
+                   ┌──────────┐           │     │                             │
+                   │ REJECTED │           │     │ externalSigningIncluded=false│
+                   └──────────┘           │     │ owner: sendForSignature()   │
+                         │                │     ▼                             │
+                         │   externalSigning    ┌──────────────┐             │
+                         │   Included=true      │ IN_SIGNATURE │             │
+                         │   auto-trigger ──────▶              │             │
+                         │   fires               └──────────────┘             │
+                         │                                                     │
+                         └─────────────────────────────────────────────────────┘
+                                  OWNER: submit() again (resubmit)
 ```
 
 ### 5.3 Resubmission After Rejection
@@ -258,8 +290,6 @@ The resubmission path depends on **who rejected**:
 Reviewer rejected  →  Full reset: all participants replaced
 Approver rejected  →  Partial reset: completed reviewers kept, only approvers replaced
 ```
-
-In the approver-rejection case, since all reviewers are already `completed`, the first new approver is **immediately unlocked** upon resubmit — no re-review is needed.
 
 ---
 
@@ -281,7 +311,7 @@ Stored as an embedded array `participants[]` on the `Contract` document.
   "unlockedAt":  "2026-06-30T10:00:00",
   "completedAt": "2026-06-30T11:30:00",
   "rejectedAt":  null,
-  "comments":    "Looks good, approved"
+  "comments":    "Looks good"
 }
 ```
 
@@ -301,15 +331,37 @@ Stored as an embedded array `participants[]` on the `Contract` document.
 
 ### 6.2 New Contract Fields (Additive)
 
-Three new fields added to the `Contract` document for the unified flow:
+Five new fields added to the `Contract` document for the unified flow:
 
 | Field | Type | Description |
 |---|---|---|
 | `participants` | `List<WorkflowParticipant>` | All assigned internal participants |
 | `currentParticipantOrder` | `Integer` | Order number currently active (null when READY_FOR_SIGNATURE) |
 | `externalSigningIncluded` | `boolean` | Whether external signing is expected after internal flow |
+| `pendingExternalSigners` | `List<ExternalSignerAssignment>` | Stored at submit time; auto-consumed when last approver completes (only when `externalSigningIncluded=true`) |
+| `flowSenderName` | `String` | Sender display name used in external signing emails |
 
-### 6.3 ParticipantRole Enum
+### 6.3 ExternalSignerAssignment (DTO + embedded in Contract)
+
+```json
+{
+  "email":      "client@example.com",
+  "name":       "Client Name",
+  "partyId":    "party-external-uuid",
+  "partyLabel": "Client",
+  "order":      1
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `email` | String | Yes | Valid email — the external signer's email address |
+| `name` | String | No | Display name shown in signature emails |
+| `partyId` | String | Yes | Must match a party ID on the contract |
+| `partyLabel` | String | Yes | Display label for the party |
+| `order` | int | Yes | Signing order (positive integer, 1-based) |
+
+### 6.4 ParticipantRole Enum
 
 ```java
 public enum ParticipantRole {
@@ -318,7 +370,7 @@ public enum ParticipantRole {
 }
 ```
 
-### 6.4 PartyType Enum
+### 6.5 PartyType Enum
 
 ```java
 public enum PartyType {
@@ -327,7 +379,7 @@ public enum PartyType {
 }
 ```
 
-### 6.5 Party Model (updated)
+### 6.6 Party Model (updated)
 
 ```json
 {
@@ -341,7 +393,86 @@ public enum PartyType {
 
 `type` is `null` on all legacy records and is treated as `INTERNAL`.
 
-### 6.6 ModificationRequest (used for rejection tracking)
+### 6.7 FlowStatusResponse Fields
+
+```json
+{
+  "contractId":              "abc123",
+  "status":                  "IN_APPROVAL",
+  "currentParticipantOrder": 2,
+  "externalSigningIncluded": true,
+  "orgFieldsComplete":       false,
+  "unfilledOrgFields":       ["CEO Name", "Contract Date"],
+  "parties": [
+    { "id": "party-1", "label": "Our Company", "type": "INTERNAL", "order": 1 },
+    { "id": "party-2", "label": "Client",      "type": "EXTERNAL", "order": 2 }
+  ],
+  "formFields": [
+    { "fieldName": "companyName", "value": "Acme Corp", "assignedParty": "party-1" }
+  ],
+  "xfdfData": "<?xml version=\"1.0\"?>...",
+  "participants": [...]
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `contractId` | String | The contract ID |
+| `status` | String | Current contract status |
+| `currentParticipantOrder` | Integer | Active order number; null if READY_FOR_SIGNATURE |
+| `externalSigningIncluded` | boolean | Whether external signing is expected |
+| `orgFieldsComplete` | boolean | True if all INTERNAL party fields are filled |
+| `unfilledOrgFields` | Array | Labels of INTERNAL party fields that are still empty |
+| `parties` | Array | Raw party list from the contract (raw, no enrichment) |
+| `formFields` | Array | Raw form fields from the contract (raw, no enrichment) |
+| `xfdfData` | String | The latest XFDF annotation string (updated by each participant) |
+| `participants` | Array | All participants with their current statuses |
+
+### 6.8 FlowFieldEditRequest Fields
+
+```json
+{
+  "formFields": [
+    { "fieldName": "companyName", "value": "Acme Corp" }
+  ],
+  "fieldValues": {
+    "companyName": "Acme Corp"
+  },
+  "xfdfData": "<?xml version=\"1.0\"?>..."
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `formFields` | Array | No | Full field objects — merged by `fieldName`/`name` key; `filledBy` is set to caller's email |
+| `fieldValues` | Map | No | Simple key-value pairs merged into `contract.fieldValues` |
+| `xfdfData` | String | No | XFDF annotation string — overwrites the existing value when provided |
+
+### 6.9 FlowCompleteRequest Fields
+
+```json
+{
+  "uploadId":   "minio-upload-id",
+  "parts":      [{ "partNumber": 1, "etag": "abc123" }],
+  "comments":   "Signed and approved",
+  "formFields": [{ "fieldName": "ceoName", "value": "John" }],
+  "fieldValues": { "ceoName": "John" },
+  "xfdfData":   "<?xml version=\"1.0\"?>..."
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `uploadId` | String | **Yes (both roles)** | The `uploadId` from `initiateUpload` |
+| `parts` | Array | **Yes (both roles)** | All part numbers and ETags from the PUT responses |
+| `parts[].partNumber` | int | Yes | Part number (1-based) |
+| `parts[].etag` | String | Yes | ETag from the presigned PUT response header |
+| `comments` | String | No | Optional remarks stored on participant |
+| `formFields` | Array | No | Optional final field state to merge before completing |
+| `fieldValues` | Map | No | Optional simple field values to merge |
+| `xfdfData` | String | No | XFDF annotation string saved on complete |
+
+### 6.10 ModificationRequest (used for rejection tracking)
 
 ```json
 {
@@ -370,34 +501,27 @@ The `role` field value is `"reviewer"` or `"approver"` (lowercase string). This 
 | No duplicate participant emails | 400 Bad Request |
 | Owner cannot assign themselves as a participant | 400 Bad Request |
 | All `REVIEWER` orders must be < all `APPROVER` orders | 400 Bad Request |
+| `externalSigners` is required when `externalSigningIncluded = true` | 400 Bad Request |
 
 ### 7.2 Field Edit Rules
 
 | Rule | Error |
 |---|---|
 | Contract must be in `IN_REVIEW` or `IN_APPROVAL` | 400 Bad Request |
-| Caller must be an assigned participant | 400 Bad Request |
-| Participant status must be `unlocked` or `in_progress` | 400 Bad Request |
+| Caller must be an active participant (`unlocked` or `in_progress`) | 400 Bad Request |
 
-### 7.3 Mark Complete Rules — Reviewer
-
-| Rule | Error |
-|---|---|
-| Contract must be in `IN_REVIEW` or `IN_APPROVAL` | 400 Bad Request |
-| Caller must be active participant | 400 Bad Request |
-| `uploadId` must be null/blank | 400 Bad Request |
-| `parts` must be null/empty | 400 Bad Request |
-
-### 7.4 Mark Complete Rules — Approver
+### 7.3 Mark Complete Rules — Both Reviewer and Approver
 
 | Rule | Error |
 |---|---|
 | Contract must be in `IN_REVIEW` or `IN_APPROVAL` | 400 Bad Request |
-| Caller must be active participant with `APPROVER` role | 400 Bad Request |
+| Caller must be active participant (unlocked or in_progress) | 400 Bad Request |
 | `uploadId` is required (non-blank) | 400 Bad Request |
 | `parts` list is required (non-empty) | 400 Bad Request |
 
-### 7.5 Rejection Rules
+Both roles must complete the multipart PDF upload. There is no role distinction in the complete endpoint.
+
+### 7.4 Rejection Rules
 
 | Rule | Error |
 |---|---|
@@ -405,16 +529,16 @@ The `role` field value is `"reviewer"` or `"approver"` (lowercase string). This 
 | Caller must be active participant | 400 Bad Request |
 | `message` is required (non-blank) | 400 Bad Request |
 
-### 7.6 Upload Rules (Approver Only)
+### 7.5 Upload Rules (Active Participant — Reviewer or Approver)
 
 | Rule | Error |
 |---|---|
-| Contract must be in `IN_APPROVAL` | 400 Bad Request |
-| Caller must be active APPROVER | 400 Bad Request |
+| Contract must be in `IN_REVIEW` or `IN_APPROVAL` | 400 Bad Request |
+| Caller must be an active participant (unlocked or in_progress) | 400 Bad Request |
 | `partNumber` must be between 1 and 10000 (for presign) | 400 Bad Request |
 | `uploadId` must be non-blank (for abort) | 400 Bad Request |
 
-### 7.7 Send for Signature Rules
+### 7.6 Send for Signature Rules (Manual — `externalSigningIncluded = false`)
 
 | Rule | Error |
 |---|---|
@@ -422,10 +546,11 @@ The `role` field value is `"reviewer"` or `"approver"` (lowercase string). This 
 | Contract must be in `READY_FOR_SIGNATURE` | 400 Bad Request |
 | Contract file (`fileUploaded`) must be true | 400 Bad Request |
 | All `INTERNAL` party form fields must be non-empty (org-gate) | 400 Bad Request |
+| All signers must have `type: "external"` — internal signers are rejected | 400 Bad Request |
 
-### 7.8 Resubmission After Approver Rejection
+### 7.7 Resubmission After Approver Rejection
 
-When the last rejection was by an approver, the new participant list passed to `submit()` **must contain only APPROVERs**. Passing a `REVIEWER` in the list throws `400 Bad Request`. The completed reviewers from the previous run are automatically preserved.
+When the last rejection was by an approver, the new participant list must contain **only APPROVERs**. Passing a `REVIEWER` throws `400 Bad Request`. The completed reviewers from the previous run are automatically preserved.
 
 ---
 
@@ -440,13 +565,7 @@ When the last rejection was by an approver, the new participant list passed to `
 
 **`POST /contracts/{id}/flow/submit`**
 
-Submits a `DRAFT` or `REJECTED` contract into the unified workflow. Assigns all participants with their roles and global orders. The contract is immediately moved to `IN_REVIEW` or `IN_APPROVAL` depending on the lowest order participant's role.
-
-**Path Parameters**
-
-| Parameter | Type | Description |
-|---|---|---|
-| `id` | String | Contract ID |
+Submits a `DRAFT` or `REJECTED` contract into the unified workflow. Assigns all participants and stores external signer info for auto-trigger.
 
 **Request Body**
 
@@ -466,18 +585,35 @@ Submits a `DRAFT` or `REJECTED` contract into the unified workflow. Assigns all 
       "order": 2
     }
   ],
-  "externalSigningIncluded": true
+  "externalSigningIncluded": true,
+  "externalSigners": [
+    {
+      "email":      "client@example.com",
+      "name":       "Client Name",
+      "partyId":    "party-external-uuid",
+      "partyLabel": "Client",
+      "order":      1
+    }
+  ],
+  "senderName": "Priya from CostaCloud"
 }
 ```
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `participants` | Array | Yes | At least one participant; must include at least one APPROVER |
+| `participants` | Array | Yes | At least one; must include at least one APPROVER |
 | `participants[].email` | String | Yes | Valid email; cannot be the owner's email |
 | `participants[].name` | String | No | Display name |
 | `participants[].role` | String | Yes | `REVIEWER` or `APPROVER` |
-| `participants[].order` | int | Yes | Positive integer; unique across all participants; all REVIEWER orders < all APPROVER orders |
-| `externalSigningIncluded` | boolean | No | Default `false`. When `true`, org-gate is enforced before external signing |
+| `participants[].order` | int | Yes | Positive integer; unique; all REVIEWER orders < all APPROVER orders |
+| `externalSigningIncluded` | boolean | No | Default `false`. When `true`, org-gate is enforced and external signers must be provided |
+| `externalSigners` | Array | **Required if `externalSigningIncluded=true`** | Stored and auto-used when last approver completes |
+| `externalSigners[].email` | String | Yes | External signer email |
+| `externalSigners[].name` | String | No | Display name for emails |
+| `externalSigners[].partyId` | String | Yes | Party ID on the contract |
+| `externalSigners[].partyLabel` | String | Yes | Party display label |
+| `externalSigners[].order` | int | Yes | Signing order (1-based) |
+| `senderName` | String | No | Display name shown in external signing emails |
 
 **Success Response — 200 OK**
 
@@ -488,7 +624,7 @@ Returns the full `ContractResponse` with `status` set to `IN_REVIEW` or `IN_APPR
 | Status | Condition |
 |---|---|
 | 404 | Contract not found, or caller is not the owner |
-| 400 | Contract not in DRAFT/REJECTED; validation failures listed in §7.1 |
+| 400 | Contract not in DRAFT/REJECTED; validation failures (see §7.1) |
 
 ---
 
@@ -496,31 +632,29 @@ Returns the full `ContractResponse` with `status` set to `IN_REVIEW` or `IN_APPR
 
 **`POST /contracts/{id}/flow/fields`**
 
-Allows the currently active participant to save form field values. On the first call, the participant's status transitions from `unlocked` → `in_progress`. Subsequent calls keep the status as `in_progress` and update values.
-
-Each updated field gets a `filledBy` attribute set to the caller's email for attribution.
+Allows the currently active participant to save form field values and/or XFDF annotation data. On the first call, the participant's status transitions from `unlocked` → `in_progress`.
 
 **Request Body**
 
 ```json
 {
   "formFields": [
-    { "fieldName": "companyName", "value": "Acme Corp" },
-    { "fieldName": "contractDate", "value": "2026-07-01" }
+    { "fieldName": "companyName", "value": "Acme Corp" }
   ],
   "fieldValues": {
-    "companyName": "Acme Corp",
-    "contractDate": "2026-07-01"
-  }
+    "companyName": "Acme Corp"
+  },
+  "xfdfData": "<?xml version=\"1.0\"?>..."
 }
 ```
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `formFields` | Array | No | Full field objects — merged by `fieldName`/`name` key |
+| `formFields` | Array | No | Full field objects — merged by `fieldName`/`name`; `filledBy` is set to caller's email |
 | `fieldValues` | Map | No | Simple key-value pairs merged into `contract.fieldValues` |
+| `xfdfData` | String | No | XFDF string — overwrites the stored value when provided |
 
-Either or both can be sent. Sending both updates both storage locations.
+Send any combination. Sending all three updates all three storage locations.
 
 **Success Response — 200 OK**
 
@@ -539,60 +673,52 @@ Returns the updated `ContractResponse`.
 
 **`POST /contracts/{id}/flow/complete`**
 
-Marks the caller's participation as complete.
+Marks the caller's participation as complete. **Both reviewers and approvers must upload the edited PDF.** Both roles use the identical request format.
 
-- **Reviewer**: Only comments allowed. Contract advances to next order (or READY_FOR_SIGNATURE).
-- **Approver**: Must provide `uploadId` and `parts` from the completed MinIO multipart upload. The PDF is finalized in MinIO, `contract.version` is incremented, and the contract advances.
-
-**Request Body — Reviewer**
-
-```json
-{
-  "comments": "Reviewed and approved — clause 5 updated"
-}
-```
-
-**Request Body — Approver**
+**Request Body**
 
 ```json
 {
   "uploadId": "minio-upload-id-from-initiate",
   "parts": [
-    { "partNumber": 1, "etag": "d8e8fca2dc0f896fd7cb4cb0031ba249" },
-    { "partNumber": 2, "etag": "a87ff679a2f3e71d9181a67b7542122c" }
+    { "partNumber": 1, "etag": "d8e8fca2dc0f896fd7cb4cb0031ba249" }
   ],
-  "comments": "Signed and approved",
-  "formFields": [
-    { "fieldName": "ceoSignature", "value": "B. Jones" }
-  ],
-  "fieldValues": {
-    "ceoSignature": "B. Jones"
-  }
+  "comments":   "Reviewed, fields updated",
+  "formFields": [{ "fieldName": "companyName", "value": "Acme Corp" }],
+  "fieldValues": { "companyName": "Acme Corp" },
+  "xfdfData":   "<?xml version=\"1.0\"?>..."
 }
 ```
 
-| Field | Type | Required for | Description |
+| Field | Type | Required | Description |
 |---|---|---|---|
-| `comments` | String | Neither | Optional remarks stored on participant |
-| `uploadId` | String | Approver only | The `uploadId` returned by `initiateUpload` |
-| `parts` | Array | Approver only | All part numbers and their ETags from the PUT responses |
-| `parts[].partNumber` | int | Approver only | Part number (1-based) |
-| `parts[].etag` | String | Approver only | ETag from the presigned PUT response header |
-| `formFields` | Array | Neither | Optional final field state to merge before completing |
-| `fieldValues` | Map | Neither | Optional simple field values to merge |
+| `uploadId` | String | **Yes** | The `uploadId` returned by `initiateUpload` |
+| `parts` | Array | **Yes** | All part numbers and ETags from the PUT responses |
+| `parts[].partNumber` | int | Yes | Part number (1-based) |
+| `parts[].etag` | String | Yes | ETag from the presigned PUT response header |
+| `comments` | String | No | Optional remarks stored on participant |
+| `formFields` | Array | No | Optional final field state to merge before completing |
+| `fieldValues` | Map | No | Optional simple field values to merge |
+| `xfdfData` | String | No | XFDF annotation string saved on complete |
 
 **Success Response — 200 OK**
 
-Returns the updated `ContractResponse`. Inspect `status` to know what happened:
-- `IN_REVIEW` or `IN_APPROVAL` — advanced to next order
-- `READY_FOR_SIGNATURE` — all internal participants completed
+Returns the updated `ContractResponse`. Inspect `status` to determine what happened:
+
+| `status` in response | Meaning |
+|---|---|
+| `IN_REVIEW` or `IN_APPROVAL` | Advanced to next order — another participant is now active |
+| `READY_FOR_SIGNATURE` | All internal participants completed; auto-trigger failed or `externalSigningIncluded=false` |
+| `IN_SIGNATURE` | Auto-trigger succeeded — external signing emails sent (`externalSigningIncluded=true`) |
+
+**Note on APPROVER completion:** After an approver marks complete, `contract.version` is incremented and synced to any pending `SignatureRequest` documents.
 
 **Error Responses**
 
 | Status | Condition |
 |---|---|
 | 404 | Contract not found |
-| 400 | Wrong status; not an active participant; reviewer provided PDF; approver missing uploadId/parts |
+| 400 | Wrong status; not an active participant; `uploadId` or `parts` missing |
 
 ---
 
@@ -600,7 +726,7 @@ Returns the updated `ContractResponse`. Inspect `status` to know what happened:
 
 **`POST /contracts/{id}/flow/reject`**
 
-Rejects the contract. The participant's status is set to `rejected`, a `ModificationRequest` is appended, and the contract status moves to `REJECTED`. The owner must resubmit.
+Rejects the contract. The participant's status is set to `rejected`, a `ModificationRequest` is appended, and the contract status moves to `REJECTED`.
 
 **Request Body**
 
@@ -609,10 +735,6 @@ Rejects the contract. The participant's status is set to `rejected`, a `Modifica
   "message": "Clause 5 requires legal review before approval"
 }
 ```
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `message` | String | Yes | Non-blank rejection reason |
 
 **Success Response — 200 OK**
 
@@ -631,11 +753,9 @@ Returns the updated `ContractResponse` with `status: "REJECTED"`.
 
 **`POST /contracts/{id}/flow/upload/initiate`**
 
-**Approver only.** Starts a MinIO multipart upload for the signed PDF at key `contracts/{id}_signed.pdf`. Returns the `uploadId` needed for subsequent presign and complete calls.
+**Active participant (reviewer or approver).** Starts a MinIO multipart upload for the signed PDF. Returns the `uploadId` needed for subsequent presign and complete calls.
 
-**Request Body**
-
-None.
+**Request Body:** None.
 
 **Success Response — 200 OK**
 
@@ -650,7 +770,7 @@ None.
 | Status | Condition |
 |---|---|
 | 404 | Contract not found |
-| 400 | Contract not in IN_APPROVAL; caller not an active APPROVER |
+| 400 | Contract not in IN_REVIEW or IN_APPROVAL; caller not an active participant |
 
 ---
 
@@ -658,7 +778,7 @@ None.
 
 **`GET /contracts/{id}/flow/upload/presign?uploadId={uploadId}&partNumber={n}`**
 
-**Approver only.** Returns a presigned PUT URL for uploading a single chunk of the signed PDF directly to MinIO. The URL expires in 15 minutes.
+**Active participant (reviewer or approver).** Returns a presigned PUT URL for uploading a single chunk directly to MinIO. Expires in 15 minutes.
 
 **Query Parameters**
 
@@ -676,14 +796,14 @@ None.
 }
 ```
 
-The frontend PUTs the chunk directly to `url`. Save the `ETag` header from that PUT response — it is required in `markComplete`.
+The client PUTs the chunk directly to `url`. Save the `ETag` response header — required in `markComplete`.
 
 **Error Responses**
 
 | Status | Condition |
 |---|---|
 | 404 | Contract not found |
-| 400 | Contract not in IN_APPROVAL; not active APPROVER; partNumber out of range |
+| 400 | Not in IN_REVIEW/IN_APPROVAL; not active participant; partNumber out of range |
 
 ---
 
@@ -691,7 +811,7 @@ The frontend PUTs the chunk directly to `url`. Save the `ETag` header from that 
 
 **`POST /contracts/{id}/flow/upload/abort?uploadId={uploadId}`**
 
-**Approver only.** Cancels an in-progress multipart upload. Call this if the user cancels the upload or an error occurs mid-upload to free MinIO resources.
+**Active participant (reviewer or approver).** Cancels an in-progress multipart upload. Call on user cancellation or upload error to free MinIO resources.
 
 **Query Parameters**
 
@@ -708,7 +828,7 @@ No body.
 | Status | Condition |
 |---|---|
 | 404 | Contract not found |
-| 400 | Contract not in IN_APPROVAL; not active APPROVER; uploadId is blank/null |
+| 400 | Not in IN_REVIEW/IN_APPROVAL; not active participant; uploadId blank |
 
 ---
 
@@ -716,9 +836,9 @@ No body.
 
 **`GET /contracts/{id}/flow/file-url`**
 
-Returns a 15-minute presigned GET URL for the current PDF. The response logic:
-- If `contracts/{id}_signed.pdf` exists in MinIO → return the signed PDF (latest approver's version)
-- Otherwise → return the original `contracts/{id}.pdf`
+Returns a 15-minute presigned GET URL for the current PDF:
+- If `contracts/{id}_signed.pdf` exists in MinIO → returns the latest participant-uploaded version
+- Otherwise → returns the original `contracts/{id}.pdf`
 
 Accessible by the contract owner or any participant (regardless of their status).
 
@@ -738,11 +858,15 @@ Accessible by the contract owner or any participant (regardless of their status)
 
 ---
 
-### 8.9 Send for Signature
+### 8.9 Send for Signature (Manual — `externalSigningIncluded = false`)
 
 **`POST /contracts/{id}/flow/send-for-signature`**
 
-**Owner only.** Sends the contract for external signature. Before delegating to the signature service, the **org-gate** is enforced: all form fields assigned to `INTERNAL` parties must have a non-empty value.
+**Owner only. Used when `externalSigningIncluded = false`.**
+
+Sends the contract for external signature. The org-gate is enforced first (all INTERNAL party fields must be non-empty). Only `type: "external"` signers are accepted — any internal signer is rejected with 400.
+
+This endpoint is also available as a **fallback** when `externalSigningIncluded = true` but the auto-trigger failed.
 
 **Request Body**
 
@@ -765,24 +889,24 @@ Accessible by the contract owner or any participant (regardless of their status)
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `assignments` | Array | Yes | At least one signer |
-| `assignments[].partyId` | String | Yes | Must match a party ID in the contract |
-| `assignments[].partyLabel` | String | Yes | Display label for the party |
-| `assignments[].type` | String | Yes | `"external"` or `"internal"` |
-| `assignments[].email` | String | No | Required for external signers |
+| `assignments[].partyId` | String | Yes | Must match a party ID on the contract |
+| `assignments[].partyLabel` | String | Yes | Display label |
+| `assignments[].type` | String | Yes | **Must be `"external"`** — internal signers rejected |
+| `assignments[].email` | String | Yes | Signer's email address |
 | `assignments[].name` | String | No | Display name |
 | `assignments[].order` | int | Yes | Signing order (1-based) |
-| `senderName` | String | No | Displayed as sender name in emails |
+| `senderName` | String | No | Shown as sender name in signature emails |
 
 **Success Response — 200 OK**
 
-Returns the updated `ContractResponse` (delegated from signature service).
+Returns the updated `ContractResponse` with `status: "IN_SIGNATURE"`.
 
 **Error Responses**
 
 | Status | Condition |
 |---|---|
 | 404 | Contract not found, or caller not owner |
-| 400 | Status not READY_FOR_SIGNATURE; file not uploaded; INTERNAL party field(s) empty (org-gate) |
+| 400 | Status not READY_FOR_SIGNATURE; file not uploaded; org fields empty; signer type is not "external" |
 
 ---
 
@@ -790,49 +914,38 @@ Returns the updated `ContractResponse` (delegated from signature service).
 
 **`GET /contracts/{id}/flow/status`**
 
-Returns the full status of the unified workflow for a contract. Includes all participant statuses, current active order, and org-gate readiness.
+Returns the full status of the unified workflow. Includes participant statuses, form field state, XFDF data, party list, and org-gate readiness.
 
 **Success Response — 200 OK**
 
 ```json
 {
-  "contractId":             "abc123",
-  "status":                 "IN_APPROVAL",
+  "contractId":              "abc123",
+  "status":                  "IN_APPROVAL",
   "currentParticipantOrder": 2,
-  "participants": [
-    {
-      "email":       "reviewer@example.com",
-      "name":        "Alice Smith",
-      "role":        "REVIEWER",
-      "order":       1,
-      "status":      "completed",
-      "completedAt": "2026-06-30T11:30:00",
-      "comments":    "Approved"
-    },
-    {
-      "email":      "approver@example.com",
-      "name":       "Bob Jones",
-      "role":       "APPROVER",
-      "order":      2,
-      "status":     "unlocked",
-      "unlockedAt": "2026-06-30T11:30:00"
-    }
-  ],
   "externalSigningIncluded": true,
   "orgFieldsComplete":       false,
-  "unfilledOrgFields":       ["CEO Name", "Contract Date"]
+  "unfilledOrgFields":       ["CEO Name", "Contract Date"],
+  "parties": [
+    { "id": "p1", "label": "Our Company", "type": "INTERNAL", "order": 1 },
+    { "id": "p2", "label": "Client",      "type": "EXTERNAL", "order": 2 }
+  ],
+  "formFields": [
+    { "fieldName": "companyName", "value": "Acme Corp", "assignedParty": "p1", "filledBy": "reviewer@example.com" }
+  ],
+  "xfdfData": "<?xml version=\"1.0\"?>...",
+  "participants": [
+    {
+      "email": "reviewer@example.com", "role": "REVIEWER", "order": 1,
+      "status": "completed", "completedAt": "2026-07-01T11:30:00"
+    },
+    {
+      "email": "approver@example.com", "role": "APPROVER", "order": 2,
+      "status": "unlocked", "unlockedAt": "2026-07-01T11:30:00"
+    }
+  ]
 }
 ```
-
-| Field | Type | Description |
-|---|---|---|
-| `contractId` | String | The contract ID |
-| `status` | String | Current contract status |
-| `currentParticipantOrder` | Integer | Active order number; null if READY_FOR_SIGNATURE |
-| `participants` | Array | All participants with their current statuses |
-| `externalSigningIncluded` | boolean | Whether external signing is expected |
-| `orgFieldsComplete` | boolean | True if all INTERNAL party fields are filled |
-| `unfilledOrgFields` | Array | Labels of INTERNAL party fields that are still empty |
 
 **Access:** Owner or any participant. Outsiders receive 404.
 
@@ -842,28 +955,29 @@ Returns the full status of the unified workflow for a contract. Includes all par
 
 **`GET /contracts/flow/inbox`**
 
-Returns a list of contracts where the authenticated caller has an **active task** — i.e., they are an assigned participant with status `unlocked` or `in_progress`. Contracts where the caller's status is `pending`, `completed`, or `rejected` are excluded.
+Returns contracts where the caller has an **active task** — status `unlocked` or `in_progress`. Excludes `pending`, `completed`, and `rejected`.
 
 **Success Response — 200 OK**
 
-```json
-[
-  {
-    "id":     "abc123",
-    "title":  "Service Agreement v3",
-    "status": "IN_REVIEW",
-    ...
-  }
-]
-```
+Array of `ContractListResponse` objects. Empty array if the caller has no active tasks.
 
-Returns an array of `ContractListResponse` objects. Empty array if the caller has no active tasks.
+---
+
+### 8.12 Flow Sent
+
+**`GET /contracts/flow/sent`**
+
+Returns contracts where the caller has **already completed** their participation (status `completed`). This is the read-only view for the "Sent" tab — the caller can view contract details but cannot edit or take any action.
+
+**Success Response — 200 OK**
+
+Array of `ContractListResponse` objects. Empty array if the caller has not completed any contracts.
 
 ---
 
 ## 9. Multipart PDF Upload Guide
 
-Approvers upload their signed PDF using a three-step MinIO multipart flow. The upload goes **browser → MinIO directly** — the Spring Boot server is not in the upload path (only coordination calls pass through it).
+Both reviewers and approvers upload the edited PDF using the same three-step MinIO multipart flow. The upload goes **browser → MinIO directly** — the Spring Boot server is not in the upload path (only coordination calls pass through it).
 
 ### Step 1 — Initiate
 
@@ -881,7 +995,7 @@ Store the `uploadId`.
 
 ### Step 2 — Upload Parts
 
-For each chunk of the PDF (typically one part for files < 100 MB):
+For each chunk (typically one part for files < 100 MB):
 
 ```
 GET /contracts/{id}/flow/upload/presign?uploadId={uploadId}&partNumber=1
@@ -893,16 +1007,16 @@ Response:
 { "url": "https://minio.../presigned-url", "partNumber": 1 }
 ```
 
-Then PUT the chunk directly to MinIO (no auth header needed — the URL is pre-signed):
+PUT the chunk directly to MinIO (no auth header — URL is pre-signed):
 ```
 PUT {presigned-url}
 Content-Type: application/pdf
 Body: <binary PDF chunk>
 ```
 
-Capture the `ETag` response header. You need it in Step 3.
+**Capture the `ETag` response header.** Required in Step 3.
 
-### Step 3 — Complete (Mark Approve)
+### Step 3 — Complete (Mark Complete)
 
 ```
 POST /contracts/{id}/flow/complete
@@ -914,13 +1028,11 @@ Content-Type: application/json
   "parts": [
     { "partNumber": 1, "etag": "d8e8fca2dc0f896fd7cb4cb0031ba249" }
   ],
-  "comments": "Signed and approved"
+  "comments": "Reviewed and updated"
 }
 ```
 
 ### Aborting on Error
-
-If the upload fails or the user cancels:
 
 ```
 POST /contracts/{id}/flow/upload/abort?uploadId={uploadId}
@@ -929,18 +1041,18 @@ Authorization: Bearer <token>
 
 ### MinIO Object Key
 
-The signed PDF is always stored at:
+The edited PDF is always stored at:
 ```
 contracts/{contractId}_signed.pdf
 ```
 
-This key is overwritten after each approver completes. The original upload at `contracts/{contractId}.pdf` is never modified.
+This key is overwritten after each participant completes. The original upload at `contracts/{contractId}.pdf` is never modified.
 
 ---
 
 ## 10. Org-Field Gate
 
-The org-gate prevents external signing from starting while internal org-party fields are still empty. It is enforced automatically in `sendForSignature()`.
+The org-gate prevents external signing from starting while internal org-party fields are still empty. It is enforced in both `sendForSignature()` (manual path) and `triggerAutoExternalSigning()` (auto path).
 
 ### How It Works
 
@@ -955,17 +1067,84 @@ The org-gate prevents external signing from starting while internal org-party fi
 | No `formFields` on contract | Passes — nothing to check |
 | All parties are `EXTERNAL` | Passes — no internal party IDs |
 | No parties defined | Passes — internal party ID set is empty |
-| `externalSigningIncluded = false` | Gate still runs but passes if all internal fields are filled — it does not skip based on this flag |
 
 ### Checking Gate State Before Sending
 
-Call `GET /contracts/{id}/flow/status` — the response includes `orgFieldsComplete` and `unfilledOrgFields`. Use these to show the user which fields still need to be filled before sending.
+Call `GET /contracts/{id}/flow/status` — the response includes `orgFieldsComplete` and `unfilledOrgFields`. Use these to show the user which fields need to be filled before sending.
 
 ---
 
-## 11. Resubmission After Rejection
+## 11. External Signing — Auto-Trigger vs Manual
 
-When a contract is in `REJECTED` status, the owner calls `POST /contracts/{id}/flow/submit` again with a new participant list. The behavior depends on the last rejector's role.
+### When `externalSigningIncluded = true` (Auto-Trigger)
+
+1. At submit time, provide `externalSigners[]` and optionally `senderName`
+2. These are stored on the contract as `pendingExternalSigners` and `flowSenderName`
+3. When the last approver calls `markComplete`:
+   - Contract is saved as `READY_FOR_SIGNATURE`
+   - `triggerAutoExternalSigning()` fires immediately
+   - Builds `SignerAssignmentDto` list from `pendingExternalSigners`, resolving `partyId`/`partyLabel` from the contract's party list if needed
+   - Calls `signatureService.submitForSignature()` → contract transitions to `IN_SIGNATURE`, emails sent
+   - Contract is reloaded from DB; `markComplete` response shows `IN_SIGNATURE`
+
+**Submit request example (auto-trigger):**
+```json
+{
+  "participants": [
+    { "email": "reviewer@example.com", "role": "REVIEWER", "order": 1 },
+    { "email": "approver@example.com", "role": "APPROVER", "order": 2 }
+  ],
+  "externalSigningIncluded": true,
+  "externalSigners": [
+    {
+      "email":      "client@example.com",
+      "name":       "Client Name",
+      "partyId":    "party-external-uuid",
+      "partyLabel": "Client",
+      "order":      1
+    }
+  ],
+  "senderName": "Priya from CostaCloud"
+}
+```
+
+### When `externalSigningIncluded = false` (Manual)
+
+1. At submit time, no `externalSigners` needed
+2. Contract reaches `READY_FOR_SIGNATURE` after last approver completes
+3. Owner checks `GET /contracts/{id}/flow/status` to confirm `orgFieldsComplete = true`
+4. Owner calls `POST /contracts/{id}/flow/send-for-signature` with signer assignments
+
+**Send-for-signature request example (manual):**
+```json
+{
+  "assignments": [
+    {
+      "type":       "external",
+      "email":      "client@example.com",
+      "name":       "Client Name",
+      "partyId":    "party-external-uuid",
+      "partyLabel": "Client",
+      "order":      1
+    }
+  ],
+  "senderName": "Priya from CostaCloud"
+}
+```
+
+### External-Only Validation
+
+In both paths, only `type: "external"` signers are accepted. Passing an internal signer returns:
+```
+400 Bad Request: Only external signers are allowed in the unified flow.
+Signer 'user@company.com' has type 'internal'.
+```
+
+---
+
+## 12. Resubmission After Rejection
+
+When a contract is in `REJECTED` status, the owner calls `POST /contracts/{id}/flow/submit` again.
 
 ### Case A — Last Rejector Was a Reviewer
 
@@ -980,11 +1159,11 @@ Full reset. The entire participant list is replaced.
 }
 ```
 
-The contract starts fresh from order 1 with status `IN_REVIEW` or `IN_APPROVAL` based on the first participant.
+The contract starts fresh from order 1.
 
 ### Case B — Last Rejector Was an Approver
 
-Partial reset. Completed reviewers are **preserved** and the new list must contain **only APPROVERs**.
+Partial reset. Completed reviewers are **preserved**; only new APPROVERs can be provided.
 
 ```json
 {
@@ -994,45 +1173,87 @@ Partial reset. Completed reviewers are **preserved** and the new list must conta
 }
 ```
 
-The service automatically merges the preserved (completed) reviewers with the new approvers. Because all reviewers are already `completed`, the new approver at the minimum order is immediately `unlocked` — no re-review cycle. The contract status is set to `IN_APPROVAL`.
+Completed reviewers are automatically merged in. The new approver is immediately `unlocked`. Status becomes `IN_APPROVAL`.
 
-Passing a `REVIEWER` in the new list when the last rejector was an approver throws `400 Bad Request`.
+Passing a `REVIEWER` in this case throws `400 Bad Request`.
 
 ### Rejection History
 
-Every rejection appends a `ModificationRequest` entry to `contract.modificationRequests[]`:
+Every rejection appends a `ModificationRequest`:
 
 ```json
 {
   "requestedBy": "approver@example.com",
   "role":        "approver",
   "message":     "CFO needs to review first",
-  "requestedAt": "2026-06-30T14:00:00"
+  "requestedAt": "2026-07-01T14:00:00"
 }
 ```
 
-On resubmission, a new entry is also appended:
+On resubmission, a `"contractor"` entry is also appended:
 ```json
 {
   "requestedBy": "owner@example.com",
   "role":        "contractor",
   "message":     "Resubmitted after approver rejection",
-  "requestedAt": "2026-06-30T15:00:00"
+  "requestedAt": "2026-07-01T15:00:00"
 }
 ```
 
 ---
 
-## 12. Error Reference
+## 13. Email Delivery & Error Handling
+
+### How Emails Are Sent
+
+When `signatureService.submitForSignature()` is called (either via auto-trigger or the manual `sendForSignature` endpoint), it:
+
+1. Saves the contract as `IN_SIGNATURE`
+2. Creates a `SignatureRequest` document per external signer
+3. Calls `emailService.sendSignatureRequestEmail()` for each signer
+
+### Error Behavior
+
+`EmailService.sendSignatureRequestEmail()` now **rethrows** on SMTP failure (as `RuntimeException`) after logging the full error. The callers (`SignatureService` and `AutoAdvanceService`) catch this exception per-signer and log:
+
+```
+SIGNATURE EMAIL NOT SENT — contract=<id>, signer=<email>: <reason>
+```
+
+This means:
+- **The contract IS in `IN_SIGNATURE`** and the `SignatureRequest` IS saved — the signing session is open
+- **The email was not delivered** — the signer won't receive the link unless manually resent
+- **The `markComplete` API still returns 200** — the approver's action completed successfully
+
+### SMTP Configuration
+
+```properties
+# application.properties
+spring.mail.host=smtp.gmail.com
+spring.mail.port=587
+spring.mail.username=priya@costacloud.com
+spring.mail.password=<app-password>
+spring.mail.properties.mail.smtp.auth=true
+spring.mail.properties.mail.smtp.starttls.enable=true
+```
+
+**If emails are not being received**, check server logs for:
+- `535 5.7.8 Username and Password not accepted` → Gmail app password expired or invalid. Regenerate at **Google Account → Security → 2-Step Verification → App Passwords**.
+- `Connection refused` → SMTP host/port is wrong or firewall blocking.
+- `535 5.7.14 ... web login required` → 2FA not enabled on the account; app passwords require 2FA.
+
+---
+
+## 14. Error Reference
 
 All errors follow the global exception handler format:
 
 ```json
 {
-  "timestamp": "2026-06-30T12:00:00.000+00:00",
+  "timestamp": "2026-07-01T12:00:00.000+00:00",
   "status":    400,
   "error":     "Bad Request",
-  "message":   "Approvers must sign and upload the contract PDF. uploadId is required.",
+  "message":   "uploadId is required — upload the edited PDF before marking complete.",
   "path":      "/contracts/abc123/flow/complete"
 }
 ```
@@ -1049,33 +1270,33 @@ All errors follow the global exception handler format:
 | 400 | `Duplicate participant emails are not allowed` | Same email twice |
 | 400 | `You cannot assign yourself as a participant` | Owner email in participant list |
 | 400 | `All REVIEWER orders must be lower than all APPROVER orders.` | Order constraint violated |
+| 400 | `externalSigners list is required when externalSigningIncluded is true` | Missing externalSigners on submit |
 | 400 | `Field edits are only allowed while the contract is IN_REVIEW or IN_APPROVAL.` | Wrong status for field edit |
 | 400 | `You are not an assigned participant for this contract` | Email not in participants list |
 | 400 | `It is not your turn yet, or you have already completed your action on this contract` | Status is pending/completed/rejected |
-| 400 | `Reviewers cannot upload a signed PDF. Only approvers sign the contract.` | Reviewer provided uploadId or parts |
-| 400 | `Approvers must sign and upload the contract PDF. uploadId is required.` | Approver missing uploadId |
-| 400 | `Approvers must sign and upload the contract PDF. parts list is required.` | Approver missing parts |
-| 400 | `Upload is only allowed during the approval stage.` | Not in IN_APPROVAL |
-| 400 | `Only approvers can upload a signed PDF` | Reviewer calling upload endpoint |
+| 400 | `uploadId is required — upload the edited PDF before marking complete.` | Missing uploadId in complete |
+| 400 | `parts list is required — complete the multipart upload before marking complete.` | Missing parts in complete |
+| 400 | `Upload is only allowed during the review or approval stage.` | Upload called outside IN_REVIEW/IN_APPROVAL |
 | 400 | `Part number must be between 1 and 10000` | Invalid partNumber |
 | 400 | `uploadId is required` | Blank uploadId in abort |
-| 400 | `Contract must be READY_FOR_SIGNATURE to send for external signature.` | Wrong status |
+| 400 | `Contract must be READY_FOR_SIGNATURE to send for external signature.` | Wrong status for send-for-signature |
 | 400 | `Contract file must be uploaded before sending for signature` | fileUploaded = false |
-| 400 | `Cannot send for external signature — the following org fields are still empty: CEO Name, Contract Date` | Org-gate failure |
+| 400 | `Cannot send for external signature — the following org fields are still empty: CEO Name` | Org-gate failure |
+| 400 | `Only external signers are allowed in the unified flow. Signer 'x@y.com' has type 'internal'.` | Internal signer in assignments |
 | 400 | `No rejection record found. Cannot determine resubmission type.` | REJECTED contract with no ModificationRequest |
 | 400 | `When resubmitting after approver rejection, only APPROVER participants can be changed.` | Reviewer in list after approver rejection |
 
 ---
 
-## 13. End-to-End Integration Walkthrough
+## 15. End-to-End Integration Walkthrough
 
-This walkthrough covers the complete happy path: two internal participants (reviewer + approver) followed by one external signer.
+This walkthrough covers the complete happy path: reviewer + approver, with auto-trigger external signing.
 
 > Replace `BASE_URL`, `OWNER_TOKEN`, `REVIEWER_TOKEN`, `APPROVER_TOKEN`, and `CONTRACT_ID` with actual values.
 
 ---
 
-**Step 1 — Owner submits the contract into unified flow**
+**Step 1 — Owner submits the contract (with auto-trigger)**
 
 ```bash
 curl -X POST $BASE_URL/contracts/$CONTRACT_ID/flow/submit \
@@ -1086,7 +1307,11 @@ curl -X POST $BASE_URL/contracts/$CONTRACT_ID/flow/submit \
       { "email": "reviewer@example.com", "name": "Alice", "role": "REVIEWER", "order": 1 },
       { "email": "approver@example.com", "name": "Bob",   "role": "APPROVER", "order": 2 }
     ],
-    "externalSigningIncluded": true
+    "externalSigningIncluded": true,
+    "externalSigners": [
+      { "email": "client@example.com", "name": "Client", "partyId": "p-ext-1", "partyLabel": "Client", "order": 1 }
+    ],
+    "senderName": "Priya from CostaCloud"
   }'
 ```
 
@@ -1101,21 +1326,27 @@ curl -X GET $BASE_URL/contracts/flow/inbox \
   -H "Authorization: Bearer $REVIEWER_TOKEN"
 ```
 
-Contract appears in Alice's inbox.
+---
+
+**Step 3 — Reviewer gets the PDF to review**
+
+```bash
+curl -X GET $BASE_URL/contracts/$CONTRACT_ID/flow/file-url \
+  -H "Authorization: Bearer $REVIEWER_TOKEN"
+# Download and annotate the PDF
+```
 
 ---
 
-**Step 3 — Reviewer edits org fields**
+**Step 4 — Reviewer saves field edits (with XFDF)**
 
 ```bash
 curl -X POST $BASE_URL/contracts/$CONTRACT_ID/flow/fields \
   -H "Authorization: Bearer $REVIEWER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "fieldValues": {
-      "companyName":  "Acme Corp",
-      "contractDate": "2026-07-01"
-    }
+    "fieldValues": { "companyName": "Acme Corp" },
+    "xfdfData": "<?xml version=\"1.0\"?>..."
   }'
 ```
 
@@ -1123,133 +1354,130 @@ Alice's status moves to `in_progress`.
 
 ---
 
-**Step 4 — Reviewer marks complete**
+**Step 5 — Reviewer initiates upload**
+
+```bash
+curl -X POST $BASE_URL/contracts/$CONTRACT_ID/flow/upload/initiate \
+  -H "Authorization: Bearer $REVIEWER_TOKEN"
+# Response: { "uploadId": "REVIEWER_UPLOAD_ID" }
+```
+
+---
+
+**Step 6 — Reviewer gets presigned URL and uploads PDF**
+
+```bash
+curl -X GET "$BASE_URL/contracts/$CONTRACT_ID/flow/upload/presign?uploadId=REVIEWER_UPLOAD_ID&partNumber=1" \
+  -H "Authorization: Bearer $REVIEWER_TOKEN"
+# Response: { "url": "PRESIGNED_URL", "partNumber": 1 }
+
+curl -X PUT "PRESIGNED_URL" -H "Content-Type: application/pdf" --data-binary @reviewed-contract.pdf
+# Save ETag from response header → REVIEWER_ETAG
+```
+
+---
+
+**Step 7 — Reviewer marks complete**
 
 ```bash
 curl -X POST $BASE_URL/contracts/$CONTRACT_ID/flow/complete \
   -H "Authorization: Bearer $REVIEWER_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{ "comments": "All fields verified, approved" }'
+  -d '{
+    "uploadId": "REVIEWER_UPLOAD_ID",
+    "parts":    [{ "partNumber": 1, "etag": "REVIEWER_ETAG" }],
+    "comments": "Fields verified and updated"
+  }'
 ```
 
 Alice becomes `completed`. Bob is `unlocked`. Contract moves to `IN_APPROVAL`.
 
 ---
 
-**Step 5 — Approver checks flow status**
-
-```bash
-curl -X GET $BASE_URL/contracts/$CONTRACT_ID/flow/status \
-  -H "Authorization: Bearer $APPROVER_TOKEN"
-```
-
-Bob sees `status: IN_APPROVAL`, his status is `unlocked`.
-
----
-
-**Step 6 — Approver gets current PDF to sign**
+**Step 8 — Approver gets PDF (reviewer's updated version)**
 
 ```bash
 curl -X GET $BASE_URL/contracts/$CONTRACT_ID/flow/file-url \
   -H "Authorization: Bearer $APPROVER_TOKEN"
+# Returns the _signed.pdf uploaded by the reviewer
 ```
-
-Returns presigned URL. Bob downloads and signs the PDF.
 
 ---
 
-**Step 7 — Approver initiates upload**
+**Step 9 — Approver initiates upload**
 
 ```bash
 curl -X POST $BASE_URL/contracts/$CONTRACT_ID/flow/upload/initiate \
   -H "Authorization: Bearer $APPROVER_TOKEN"
-# Response: { "uploadId": "UPLOAD_ID" }
+# Response: { "uploadId": "APPROVER_UPLOAD_ID" }
 ```
 
 ---
 
-**Step 8 — Approver gets presigned URL and uploads chunk**
+**Step 10 — Approver uploads signed PDF**
 
 ```bash
-curl -X GET "$BASE_URL/contracts/$CONTRACT_ID/flow/upload/presign?uploadId=UPLOAD_ID&partNumber=1" \
+curl -X GET "$BASE_URL/contracts/$CONTRACT_ID/flow/upload/presign?uploadId=APPROVER_UPLOAD_ID&partNumber=1" \
   -H "Authorization: Bearer $APPROVER_TOKEN"
-# Response: { "url": "PRESIGNED_URL", "partNumber": 1 }
 
-# PUT directly to MinIO (no auth header)
-curl -X PUT "PRESIGNED_URL" \
-  -H "Content-Type: application/pdf" \
-  --data-binary @signed-contract.pdf
-# Save ETag from response header
+curl -X PUT "PRESIGNED_URL" -H "Content-Type: application/pdf" --data-binary @signed-contract.pdf
+# Save ETag → APPROVER_ETAG
 ```
 
 ---
 
-**Step 9 — Approver marks complete with signed PDF**
+**Step 11 — Approver marks complete (triggers external signing automatically)**
 
 ```bash
 curl -X POST $BASE_URL/contracts/$CONTRACT_ID/flow/complete \
   -H "Authorization: Bearer $APPROVER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "uploadId": "UPLOAD_ID",
-    "parts":    [{ "partNumber": 1, "etag": "ETAG_FROM_STEP_8" }],
+    "uploadId": "APPROVER_UPLOAD_ID",
+    "parts":    [{ "partNumber": 1, "etag": "APPROVER_ETAG" }],
     "comments": "Signed by CFO"
   }'
 ```
 
-Bob becomes `completed`. Contract moves to `READY_FOR_SIGNATURE`.
+Response `status` is `IN_SIGNATURE` — external signing auto-triggered. `client@example.com` receives the signing email.
 
 ---
 
-**Step 10 — Owner checks org-gate**
+**Manual path (if `externalSigningIncluded = false` or auto-trigger failed):**
 
 ```bash
+# Owner checks org-gate
 curl -X GET $BASE_URL/contracts/$CONTRACT_ID/flow/status \
   -H "Authorization: Bearer $OWNER_TOKEN"
-# Check orgFieldsComplete and unfilledOrgFields
-```
+# Verify orgFieldsComplete = true
 
----
-
-**Step 11 — Owner sends for external signature**
-
-```bash
+# Owner sends manually
 curl -X POST $BASE_URL/contracts/$CONTRACT_ID/flow/send-for-signature \
   -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "assignments": [
-      {
-        "partyId":    "party-external-uuid",
-        "partyLabel": "Client",
-        "type":       "external",
-        "email":      "client@example.com",
-        "name":       "Client Name",
-        "order":      1
-      }
+      { "type": "external", "email": "client@example.com", "name": "Client",
+        "partyId": "p-ext-1", "partyLabel": "Client", "order": 1 }
     ],
-    "senderName": "Acme Corp"
+    "senderName": "Priya from CostaCloud"
   }'
 ```
 
-External signing flow begins.
-
 ---
 
-## 14. Frontend Integration Guide
+## 16. Frontend Integration Guide
 
-### 14.1 Detecting Which Flow a Contract Is In
-
-A contract is in the **unified workflow** if `contract.participants` is non-null and non-empty. A contract is in the **legacy workflow** if `contract.reviewers` or `contract.approver` is set. These are mutually exclusive.
+### 16.1 Detecting Which Flow a Contract Is In
 
 | Field present | Flow |
 |---|---|
 | `participants[]` non-empty | Unified workflow |
 | `reviewers[]` / `approver` set | Legacy workflow |
 
-### 14.2 Rendering Participant List (Owner View)
+### 16.2 Rendering Participant List (Owner View)
 
-Use `GET /contracts/{id}/flow/status` to get the full `participants[]` array with current statuses. Display a timeline or step-list using `order` for position and `status` for the icon/color:
+Use `GET /contracts/{id}/flow/status` to get `participants[]`. Display a timeline using `order` for position and `status` for icon/color:
 
 | Status | UI suggestion |
 |---|---|
@@ -1259,71 +1487,104 @@ Use `GET /contracts/{id}/flow/status` to get the full `participants[]` array wit
 | `completed` | Green check — done |
 | `rejected` | Red X — rejected |
 
-### 14.3 Participant Inbox (Reviewer / Approver View)
+### 16.3 Participant Inbox (Reviewer / Approver View)
 
-On login, call `GET /contracts/flow/inbox` to get contracts where the user has an active task. Show a badge count or a dedicated inbox section.
+On login, call `GET /contracts/flow/inbox` for contracts where the user has an active task.
 
-### 14.4 Reviewer Editing Flow
+### 16.4 Participant Sent Tab (Read-Only)
 
-1. Call `GET /contracts/{id}/flow/status` to confirm `status = IN_REVIEW` and participant's status is `unlocked` or `in_progress`
-2. Load form fields from `GET /contracts/{id}` → `formFields[]`
-3. As the user edits, call `POST /contracts/{id}/flow/fields` to save
-4. When done, call `POST /contracts/{id}/flow/complete` (no uploadId/parts)
-5. Or call `POST /contracts/{id}/flow/reject` with a reason
+Call `GET /contracts/flow/sent` for contracts the user has already completed. These are read-only — do not show edit/complete/reject actions on contracts from this list.
 
-### 14.5 Approver Signing Flow
+### 16.5 Reviewer and Approver Editing Flow (Identical for Both Roles)
 
-1. Confirm `status = IN_APPROVAL` and participant's status is `unlocked` or `in_progress`
-2. Call `GET /contracts/{id}/flow/file-url` to get the PDF to sign
-3. User signs the PDF (in a PDF editor or signing tool)
-4. Call `POST /contracts/{id}/flow/upload/initiate` → receive `uploadId`
-5. For each chunk:
-   - Call `GET /contracts/{id}/flow/upload/presign?uploadId=...&partNumber=N`
-   - PUT the chunk to the presigned URL
-   - Collect the `ETag` from response header
-6. Call `POST /contracts/{id}/flow/complete` with `uploadId` + `parts[]`
-7. On any error, call `POST /contracts/{id}/flow/upload/abort?uploadId=...`
+1. Confirm `status = IN_REVIEW` (for reviewer) or `IN_APPROVAL` (for approver) via `GET /contracts/{id}/flow/status`
+2. Confirm participant's status is `unlocked` or `in_progress`
+3. Load PDF via `GET /contracts/{id}/flow/file-url` — always returns the most recent version
+4. Load form fields from `formFields[]` and XFDF from `xfdfData` in the status response
+5. User edits fields and/or annotates the PDF
+6. Save edits with `POST /contracts/{id}/flow/fields` (including `xfdfData` if annotations changed)
+7. Initiate upload: `POST /contracts/{id}/flow/upload/initiate` → `uploadId`
+8. For each chunk:
+   - `GET /contracts/{id}/flow/upload/presign?uploadId=...&partNumber=N`
+   - PUT chunk to presigned URL
+   - Collect `ETag` from response header
+9. Call `POST /contracts/{id}/flow/complete` with `uploadId`, `parts[]`, and optionally final `xfdfData`
+10. On error or cancel: `POST /contracts/{id}/flow/upload/abort?uploadId=...`
+11. To reject instead: `POST /contracts/{id}/flow/reject` with a message
 
-### 14.6 Owner Send-for-Signature Flow
+### 16.6 Handling `markComplete` Response Status
 
-1. Poll `GET /contracts/{id}/flow/status` until `status = READY_FOR_SIGNATURE`
-2. Check `orgFieldsComplete`. If `false`, show `unfilledOrgFields` list to the user — they need to fill those in the contract editor
-3. When all fields filled, call `POST /contracts/{id}/flow/send-for-signature`
+After calling `/flow/complete`, check the response `status`:
 
-### 14.7 Rejection & Resubmit UI
+| Response `status` | What to show |
+|---|---|
+| `IN_REVIEW` / `IN_APPROVAL` | "Submitted — waiting for next participant" |
+| `READY_FOR_SIGNATURE` | "All internal work done — external signing pending" (owner may need to act) |
+| `IN_SIGNATURE` | "External signing emails sent — contract is with the client" |
+
+### 16.7 Owner View After All Approvers Complete
+
+**If `externalSigningIncluded = true`:** The `markComplete` response from the last approver will already show `IN_SIGNATURE` — no action needed from the owner.
+
+**If `externalSigningIncluded = false` or auto-trigger failed:**
+1. Contract shows `READY_FOR_SIGNATURE`
+2. Call `GET /contracts/{id}/flow/status` and check `orgFieldsComplete`
+3. If `false`, show `unfilledOrgFields` — user needs to fill those in the contract editor
+4. When all fields filled, call `POST /contracts/{id}/flow/send-for-signature`
+
+### 16.8 Submit with External Signers (Owner)
+
+When `externalSigningIncluded = true`, collect external signer details in the submit form:
+- `email` (required)
+- `name` (optional, shown in email)
+- `partyId` and `partyLabel` — must match an EXTERNAL party on the contract
+- `order` — signing sequence
+
+These are stored and auto-used when the last approver completes. The owner does not need to provide them again.
+
+### 16.9 Field Editing Rules for Participants
+
+| Field type | Who can edit |
+|---|---|
+| INTERNAL party field | Any active participant |
+| EXTERNAL party field | **Not editable by internal participants** — only the external signer fills these |
+| Signature field | **Not editable by internal participants** — only the external signer fills these |
+
+The `xfdfData` string represents the full annotation state. Save it on every `/flow/fields` call and include it in `/flow/complete`.
+
+### 16.10 Rejection & Resubmit UI
 
 When `contract.status = REJECTED`:
-- Read `contract.modificationRequests[]` — the last entry has the rejection reason and role
-- Show the owner a resubmit form:
-  - If `lastRejection.role = "reviewer"` → show full participant assignment form
-  - If `lastRejection.role = "approver"` → show only approver assignment (reviewers are locked in)
+- Read `contract.modificationRequests[]` — the last entry with `role = "reviewer"` or `role = "approver"` shows the reason
+- If `lastRejection.role = "reviewer"` → show full participant assignment form (all participants must be re-assigned)
+- If `lastRejection.role = "approver"` → show only approver assignment (reviewers are locked in; display them as read-only)
 - Call `POST /contracts/{id}/flow/submit` with the new list
 
 ---
 
-## 15. Test Coverage
+## 17. Test Coverage
 
-The unified workflow is covered by **71 unit tests** in `UnifiedWorkflowServiceTest.java`.
+The unified workflow is covered by unit tests in `UnifiedWorkflowServiceTest.java`.
 
-| Test Class | Tests | What It Covers |
-|---|---|---|
-| `submit — fresh DRAFT` | 13 | All submission validations, status transitions, participant ordering, flag persistence |
-| `submit — resubmit after rejection` | 4 | Reviewer rejection full reset, approver rejection partial reset, validation of reviewer-in-list error, no modification records error |
-| `saveFieldEdits` | 7 | Status transitions (unlocked → in_progress), field merging, filledBy attribution, access control, wrong-status guard |
-| `markComplete` | 11 | Reviewer completion (advance + READY), reviewer PDF rejection, approver completion with MinIO call, version increment, signedPdfKey set, missing uploadId/parts errors, access control |
-| `reject` | 5 | Reviewer and approver rejection paths, mod request role field, access control, wrong-status guard |
-| `initiateUpload` | 4 | Approver gets uploadId, reviewer blocked, wrong status blocked, not found |
-| `getPresignedPartUrl` | 4 | Part number bounds (0, 10001), non-approver blocked, not found |
-| `abortUpload` | 4 | Cancel called with correct args, blank/null uploadId validation, non-approver blocked |
-| `sendForSignature` | 8 | Happy path, non-owner 404, wrong status, file not uploaded, org-gate unfilled, org-gate external party skip, no-form-fields pass, no-parties pass |
-| `getFlowStatus` | 5 | Owner access, participant access, outsider 404, orgFieldsComplete=true, orgFieldsComplete=false with labels |
-| `getFlowInbox` | 6 | Unlocked in inbox, in_progress in inbox, completed excluded, pending excluded, mixed contracts filtered, empty repo |
-| **Total** | **71** | |
+| Test Group | What It Covers |
+|---|---|
+| `submit — fresh DRAFT` | All submission validations, status transitions, participant ordering, externalSigners storage, flag persistence |
+| `submit — resubmit after rejection` | Reviewer rejection full reset, approver rejection partial reset, reviewer-in-list error, no modification records error |
+| `saveFieldEdits` | Status transitions (unlocked → in_progress), field merging, xfdfData save, filledBy attribution, access control, wrong-status guard |
+| `markComplete` | Reviewer and approver completion with upload, advance engine (next order + READY), version increment, signedPdfKey set, fileUploaded=true, missing uploadId/parts errors |
+| `reject` | Reviewer and approver rejection paths, mod request role field, access control, wrong-status guard |
+| `initiateUpload` | Reviewer and approver get uploadId, wrong status blocked, not found |
+| `getPresignedPartUrl` | Part number bounds (0, 10001), non-participant blocked, not found |
+| `abortUpload` | Cancel called with correct args, blank/null uploadId validation, non-participant blocked |
+| `sendForSignature` | Happy path, non-owner 404, wrong status, file not uploaded, org-gate unfilled, external-only validation, org-gate external party skip, no-form-fields pass |
+| `getFlowStatus` | Owner access, participant access, outsider 404, orgFieldsComplete=true/false, formFields/xfdfData/parties in response |
+| `getFlowInbox` | Unlocked in inbox, in_progress in inbox, completed excluded, pending excluded, empty repo |
+| `getFlowSent` | Completed in sent, unlocked excluded, in_progress excluded, empty repo |
 
 **Running the tests:**
 
 ```bash
-# Set JAVA_HOME to JDK 25 first (project requires Java 25)
+# Set JAVA_HOME to JDK 25 first
 $env:JAVA_HOME = "C:\Program Files\Java\jdk-25.0.2"
 $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
 
@@ -1336,4 +1597,4 @@ mvn test
 
 ---
 
-*End of Unified Workflow Documentation*
+*End of Unified Workflow Documentation — v2.0.0*
