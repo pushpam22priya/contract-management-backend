@@ -64,7 +64,10 @@ public class UnifiedWorkflowService {
         }
 
         ContractStatus status = contract.getStatus();
-        if (status != ContractStatus.DRAFT && status != ContractStatus.REJECTED) {
+        boolean isRejected = status == ContractStatus.REJECTED
+                || status == ContractStatus.REJECTED_BY_REVIEWER
+                || status == ContractStatus.REJECTED_BY_APPROVER;
+        if (status != ContractStatus.DRAFT && !isRejected) {
             throw new BadRequestException(
                     "Contract must be DRAFT or REJECTED to submit into the unified flow. Current status: " + status);
         }
@@ -121,107 +124,45 @@ public class UnifiedWorkflowService {
     }
 
     private void handleResubmit(Contract contract, FlowSubmitRequest request, String callerEmail) {
-        List<ModificationRequest> mods = contract.getModificationRequests();
-        if (mods == null || mods.isEmpty()) {
-            throw new BadRequestException("No rejection record found. Cannot determine resubmission type.");
-        }
-
-        // Last mod entry holds who rejected and their role
-        ModificationRequest lastRejection = null;
-        for (int i = mods.size() - 1; i >= 0; i--) {
-            ModificationRequest m = mods.get(i);
-            if ("reviewer".equalsIgnoreCase(m.getRole()) || "approver".equalsIgnoreCase(m.getRole())) {
-                lastRejection = m;
-                break;
-            }
-        }
-
-        if (lastRejection == null) {
-            throw new BadRequestException("No rejection record found. Cannot determine resubmission type.");
-        }
-
-        String rejectorRole = lastRejection.getRole();
+        // Contractor has refreshed the full document before resubmitting — always a full reset
+        // regardless of whether the rejection was by a reviewer or approver.
         List<ParticipantAssignment> newAssignments = request.getParticipants();
         LocalDateTime now = LocalDateTime.now();
 
-        if ("reviewer".equalsIgnoreCase(rejectorRole)) {
-            // Full reset — replace entire participant list
-            int minOrder = newAssignments.stream()
-                    .mapToInt(ParticipantAssignment::getOrder)
-                    .min()
-                    .getAsInt();
+        int minOrder = newAssignments.stream()
+                .mapToInt(ParticipantAssignment::getOrder)
+                .min()
+                .getAsInt();
 
-            List<WorkflowParticipant> participants = buildParticipantList(newAssignments, minOrder, callerEmail, now);
+        List<WorkflowParticipant> participants = buildParticipantList(newAssignments, minOrder, callerEmail, now);
 
-            contract.setParticipants(participants);
-            contract.setCurrentParticipantOrder(minOrder);
-            contract.setExternalSigningIncluded(request.isExternalSigningIncluded());
+        contract.setParticipants(participants);
+        contract.setCurrentParticipantOrder(minOrder);
+        contract.setExternalSigningIncluded(request.isExternalSigningIncluded());
 
-            ParticipantRole firstRole = newAssignments.stream()
-                    .filter(a -> a.getOrder() == minOrder)
-                    .map(ParticipantAssignment::getRole)
-                    .findFirst()
-                    .orElse(ParticipantRole.REVIEWER);
-
-            contract.setStatus(firstRole == ParticipantRole.REVIEWER
-                    ? ContractStatus.IN_REVIEW
-                    : ContractStatus.IN_APPROVAL);
-
+        if (request.isExternalSigningIncluded()) {
+            if (request.getExternalSigners() == null || request.getExternalSigners().isEmpty()) {
+                throw new BadRequestException(
+                        "externalSigners list is required when externalSigningIncluded is true");
+            }
+            contract.setPendingExternalSigners(request.getExternalSigners());
+            contract.setFlowSenderName(request.getSenderName());
         } else {
-            // Approver rejected — keep completed reviewers, reset only approvers
-
-            // New assignments must all be APPROVERs
-            for (ParticipantAssignment a : newAssignments) {
-                if (a.getRole() != ParticipantRole.APPROVER) {
-                    throw new BadRequestException(
-                            "When resubmitting after approver rejection, only APPROVER participants can be changed. " +
-                                    "Found REVIEWER in new participant list.");
-                }
-            }
-
-            validateNoDuplicateOrders(newAssignments);
-            validateNoDuplicateEmails(newAssignments);
-
-            // Collect completed reviewer emails to prevent overlap
-            List<WorkflowParticipant> completedReviewers = orEmpty(contract.getParticipants()).stream()
-                    .filter(p -> p.getRole() == ParticipantRole.REVIEWER)
-                    .collect(Collectors.toList());
-
-            Set<String> reviewerEmails = completedReviewers.stream()
-                    .map(p -> p.getEmail().toLowerCase())
-                    .collect(Collectors.toSet());
-
-            for (ParticipantAssignment a : newAssignments) {
-                if (a.getEmail() == null || a.getEmail().isBlank()) {
-                    throw new BadRequestException("Participant email cannot be blank");
-                }
-                if (a.getEmail().equalsIgnoreCase(callerEmail)) {
-                    throw new BadRequestException("You cannot assign yourself as an approver");
-                }
-                if (reviewerEmails.contains(a.getEmail().toLowerCase())) {
-                    throw new BadRequestException(
-                            "Approver cannot also be a reviewer: " + a.getEmail());
-                }
-            }
-
-            int minApproverOrder = newAssignments.stream()
-                    .mapToInt(ParticipantAssignment::getOrder)
-                    .min()
-                    .getAsInt();
-
-            List<WorkflowParticipant> newApprovers =
-                    buildParticipantList(newAssignments, minApproverOrder, callerEmail, now);
-
-            List<WorkflowParticipant> merged = new ArrayList<>(completedReviewers);
-            merged.addAll(newApprovers);
-
-            contract.setParticipants(merged);
-            contract.setCurrentParticipantOrder(minApproverOrder);
-            contract.setStatus(ContractStatus.IN_APPROVAL);
+            contract.setPendingExternalSigners(null);
+            contract.setFlowSenderName(null);
         }
 
-        appendModificationRequest(contract, callerEmail, "contractor",
-                "Resubmitted after " + rejectorRole + " rejection");
+        ParticipantRole firstRole = newAssignments.stream()
+                .filter(a -> a.getOrder() == minOrder)
+                .map(ParticipantAssignment::getRole)
+                .findFirst()
+                .orElse(ParticipantRole.REVIEWER);
+
+        contract.setStatus(firstRole == ParticipantRole.REVIEWER
+                ? ContractStatus.IN_REVIEW
+                : ContractStatus.IN_APPROVAL);
+
+        appendModificationRequest(contract, callerEmail, "contractor", "Resubmitted after rejection");
     }
 
     // ─── Save Field Edits ─────────────────────────────────────────
@@ -367,7 +308,9 @@ public class UnifiedWorkflowService {
         participant.setRejectedAt(LocalDateTime.now());
         participant.setComments(request.getMessage());
 
-        contract.setStatus(ContractStatus.REJECTED);
+        contract.setStatus(participant.getRole() == ParticipantRole.REVIEWER
+                ? ContractStatus.REJECTED_BY_REVIEWER
+                : ContractStatus.REJECTED_BY_APPROVER);
 
         appendModificationRequest(contract, callerEmail,
                 participant.getRole().name().toLowerCase(),
@@ -610,7 +553,8 @@ public class UnifiedWorkflowService {
         return contracts.stream()
                 .filter(c -> orEmpty(c.getParticipants()).stream()
                         .anyMatch(p -> p.getEmail().equalsIgnoreCase(callerEmail)
-                                && "completed".equals(p.getStatus())))
+                                && ("completed".equals(p.getStatus())
+                                || "rejected".equals(p.getStatus()))))
                 .map(ContractListResponse::new)
                 .collect(Collectors.toList());
     }
