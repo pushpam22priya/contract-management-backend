@@ -157,7 +157,7 @@ public class ContractService {
     // ─── Get ─────────────────────────────────────────────────────
 
     public ContractResponse getContract(String id, String email) {
-        return new ContractResponse(findByIdAndOwner(id, email));
+        return new ContractResponse(findByIdAndAccessible(id, email));
     }
 
     // ─── Update (PATCH) ──────────────────────────────────────────
@@ -410,6 +410,32 @@ public class ContractService {
         if (!contract.getCreatedBy().equals(email)) {
             throw new NotFoundException("Contract not found");
         }
+        return contract;
+    }
+
+    // Like findByIdAndOwner, but also allows anyone with a stake in the contract's
+    // review/approval/signature workflow (old-style or unified-flow) to read it.
+    private Contract findByIdAndAccessible(String id, String email) {
+        Contract contract = contractRepository.findById(id)
+                .orElseThrow(() -> new NotFoundException("Contract not found"));
+
+        boolean isOwner = contract.getCreatedBy().equalsIgnoreCase(email);
+        boolean isReviewer = contract.getReviewers() != null &&
+                contract.getReviewers().stream()
+                        .anyMatch(r -> r.getEmail().equalsIgnoreCase(email));
+        boolean isApprover = contract.getApprover() != null &&
+                contract.getApprover().getEmail().equalsIgnoreCase(email);
+        boolean isInternalSigner = contract.getInternalSigners() != null &&
+                contract.getInternalSigners().stream()
+                        .anyMatch(s -> s.getEmail().equalsIgnoreCase(email));
+        boolean isParticipant = contract.getParticipants() != null &&
+                contract.getParticipants().stream()
+                        .anyMatch(p -> p.getEmail().equalsIgnoreCase(email));
+
+        if (!isOwner && !isReviewer && !isApprover && !isInternalSigner && !isParticipant) {
+            throw new NotFoundException("Contract not found");
+        }
+
         return contract;
     }
 
