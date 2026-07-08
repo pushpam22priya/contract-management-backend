@@ -7,6 +7,7 @@ import com.costacloud.contractmanagement.exception.NotFoundException;
 import com.costacloud.contractmanagement.model.*;
 import com.costacloud.contractmanagement.repository.ContractRepository;
 import io.minio.MinioClient;
+import io.minio.RemoveObjectArgs;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.*;
@@ -33,10 +34,10 @@ class UnifiedWorkflowServiceTest {
 
     @InjectMocks UnifiedWorkflowService service;
 
-    private static final String CONTRACT_ID  = "contract-uw-01";
-    private static final String OWNER        = "owner@test.com";
-    private static final String REVIEWER_EMAIL  = "reviewer@test.com";
-    private static final String APPROVER_EMAIL  = "approver@test.com";
+    private static final String CONTRACT_ID    = "contract-uw-01";
+    private static final String OWNER          = "owner@test.com";
+    private static final String REVIEWER_EMAIL = "reviewer@test.com";
+    private static final String APPROVER_EMAIL = "approver@test.com";
 
     @BeforeEach
     void setUp() {
@@ -55,14 +56,10 @@ class UnifiedWorkflowServiceTest {
         return c;
     }
 
-    private Contract rejectedContract(String rejectorRole) {
+    private Contract rejectedContract(ContractStatus rejectionStatus) {
         Contract c = draftContract();
-        c.setStatus(ContractStatus.REJECTED);
-        ModificationRequest mod = new ModificationRequest();
-        mod.setRole(rejectorRole);
-        mod.setRequestedBy(rejectorRole + "@test.com");
-        mod.setMessage("Rejected by " + rejectorRole);
-        c.setModificationRequests(new ArrayList<>(List.of(mod)));
+        c.setStatus(rejectionStatus);
+        c.setModificationRequests(new ArrayList<>());
         return c;
     }
 
@@ -103,7 +100,17 @@ class UnifiedWorkflowServiceTest {
         return req;
     }
 
-    private SubmitForSignatureRequest sigRequest() {
+    private FlowCompleteRequest completeRequestWithUpload() {
+        FlowCompleteRequest.Part part = new FlowCompleteRequest.Part();
+        part.setPartNumber(1);
+        part.setEtag("etag-abc");
+        FlowCompleteRequest req = new FlowCompleteRequest();
+        req.setUploadId("upload-xyz");
+        req.setParts(List.of(part));
+        return req;
+    }
+
+    private SubmitForSignatureRequest externalSignerRequest() {
         SubmitForSignatureRequest req = new SubmitForSignatureRequest();
         SignerAssignmentDto signer = new SignerAssignmentDto();
         signer.setEmail("client@example.com");
@@ -190,12 +197,31 @@ class UnifiedWorkflowServiceTest {
 
             FlowSubmitRequest req = approverOnlyRequest();
             req.setExternalSigningIncluded(true);
+            ExternalSignerAssignment ext = new ExternalSignerAssignment();
+            ext.setEmail("client@example.com");
+            ext.setOrder(1);
+            req.setExternalSigners(List.of(ext));
 
             service.submit(CONTRACT_ID, req, OWNER);
 
             ArgumentCaptor<Contract> captor = ArgumentCaptor.forClass(Contract.class);
             verify(contractRepository).save(captor.capture());
             assertTrue(captor.getValue().isExternalSigningIncluded());
+            assertNotNull(captor.getValue().getPendingExternalSigners());
+        }
+
+        @Test
+        @DisplayName("externalSigningIncluded=true without externalSigners → BadRequestException")
+        void externalSigningTrue_withoutExternalSigners_throws() {
+            Contract c = draftContract();
+            when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
+
+            FlowSubmitRequest req = approverOnlyRequest();
+            req.setExternalSigningIncluded(true);
+            req.setExternalSigners(Collections.emptyList());
+
+            assertThrows(BadRequestException.class,
+                    () -> service.submit(CONTRACT_ID, req, OWNER));
         }
 
         @Test
@@ -306,12 +332,11 @@ class UnifiedWorkflowServiceTest {
     class Resubmit {
 
         @Test
-        @DisplayName("after reviewer rejection — full reset, all participants replaced")
-        void afterReviewerRejection_fullReset() {
-            Contract c = rejectedContract("reviewer");
-            WorkflowParticipant rejected =
-                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "rejected");
-            c.setParticipants(new ArrayList<>(List.of(rejected)));
+        @DisplayName("REJECTED_BY_REVIEWER → full reset, all participants replaced, status IN_REVIEW")
+        void afterRejectedByReviewer_fullReset() {
+            Contract c = rejectedContract(ContractStatus.REJECTED_BY_REVIEWER);
+            c.setParticipants(new ArrayList<>(List.of(
+                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "rejected"))));
 
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
             when(contractRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
@@ -324,27 +349,25 @@ class UnifiedWorkflowServiceTest {
 
             assertEquals(ContractStatus.IN_REVIEW, saved.getStatus());
             assertEquals(2, saved.getParticipants().size());
-            saved.getParticipants()
-                    .forEach(p -> assertNotEquals("rejected", p.getStatus()));
+            saved.getParticipants().forEach(p -> assertNotEquals("rejected", p.getStatus()));
         }
 
         @Test
-        @DisplayName("after approver rejection — completed reviewers kept, new approver unlocked immediately")
-        void afterApproverRejection_reviewersKept() {
-            Contract c = rejectedContract("approver");
-            WorkflowParticipant completedReviewer =
-                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "completed");
-            WorkflowParticipant rejectedApprover =
-                    participant(APPROVER_EMAIL, ParticipantRole.APPROVER, 2, "rejected");
-            c.setParticipants(new ArrayList<>(List.of(completedReviewer, rejectedApprover)));
-
-            FlowSubmitRequest req = new FlowSubmitRequest();
-            req.setParticipants(List.of(
-                    assignment("newapprover@test.com", "New Approver",
-                            ParticipantRole.APPROVER, 2)));
+        @DisplayName("REJECTED_BY_APPROVER → full reset (not partial), all participants replaced")
+        void afterRejectedByApprover_fullReset() {
+            Contract c = rejectedContract(ContractStatus.REJECTED_BY_APPROVER);
+            c.setParticipants(new ArrayList<>(List.of(
+                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "completed"),
+                    participant(APPROVER_EMAIL, ParticipantRole.APPROVER, 2, "rejected"))));
 
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
             when(contractRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+            // Full new list with both reviewer and approver
+            FlowSubmitRequest req = new FlowSubmitRequest();
+            req.setParticipants(List.of(
+                    assignment("newreviewer@test.com", "New Reviewer", ParticipantRole.REVIEWER, 1),
+                    assignment("newapprover@test.com", "New Approver", ParticipantRole.APPROVER, 2)));
 
             service.submit(CONTRACT_ID, req, OWNER);
 
@@ -352,46 +375,109 @@ class UnifiedWorkflowServiceTest {
             verify(contractRepository).save(captor.capture());
             Contract saved = captor.getValue();
 
-            WorkflowParticipant reviewer = saved.getParticipants().stream()
-                    .filter(p -> p.getRole() == ParticipantRole.REVIEWER)
-                    .findFirst().orElseThrow();
-            assertEquals("completed", reviewer.getStatus());
-
-            WorkflowParticipant approver = saved.getParticipants().stream()
-                    .filter(p -> p.getRole() == ParticipantRole.APPROVER)
-                    .findFirst().orElseThrow();
-            assertEquals("unlocked", approver.getStatus());
-            assertEquals("newapprover@test.com", approver.getEmail());
-
-            assertEquals(ContractStatus.IN_APPROVAL, saved.getStatus());
+            assertEquals(ContractStatus.IN_REVIEW, saved.getStatus());
+            assertEquals(2, saved.getParticipants().size());
+            // Old completed reviewer is gone — completely replaced
+            assertTrue(saved.getParticipants().stream()
+                    .noneMatch(p -> p.getEmail().equalsIgnoreCase(REVIEWER_EMAIL)));
+            // New reviewer is unlocked
+            assertTrue(saved.getParticipants().stream()
+                    .anyMatch(p -> p.getEmail().equalsIgnoreCase("newreviewer@test.com")
+                            && "unlocked".equals(p.getStatus())));
         }
 
         @Test
-        @DisplayName("after approver rejection — including reviewer in new list → BadRequestException")
-        void afterApproverRejection_cannotIncludeReviewer() {
-            Contract c = rejectedContract("approver");
+        @DisplayName("legacy REJECTED status also accepted for resubmission")
+        void legacyRejectedStatus_accepted() {
+            Contract c = rejectedContract(ContractStatus.REJECTED);
             c.setParticipants(new ArrayList<>());
 
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
+            when(contractRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-            FlowSubmitRequest req = new FlowSubmitRequest();
-            req.setParticipants(List.of(
-                    assignment(REVIEWER_EMAIL, "R", ParticipantRole.REVIEWER, 1),
-                    assignment(APPROVER_EMAIL, "A", ParticipantRole.APPROVER, 2)));
-            assertThrows(BadRequestException.class,
-                    () -> service.submit(CONTRACT_ID, req, OWNER));
+            assertDoesNotThrow(() -> service.submit(CONTRACT_ID, approverOnlyRequest(), OWNER));
         }
 
         @Test
-        @DisplayName("no modificationRequests on REJECTED contract → BadRequestException")
-        void noModificationRequests_throws() {
-            Contract c = draftContract();
-            c.setStatus(ContractStatus.REJECTED);
-            c.setModificationRequests(new ArrayList<>());
+        @DisplayName("resubmit deletes _signed.pdf from MinIO and clears signedPdfKey")
+        void resubmit_deletesSignedPdf_andClearsSignedPdfKey() throws Exception {
+            Contract c = rejectedContract(ContractStatus.REJECTED_BY_APPROVER);
+            c.setSignedPdfKey("contracts/" + CONTRACT_ID + "_signed.pdf");
+            c.setParticipants(new ArrayList<>());
 
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
-            assertThrows(BadRequestException.class,
-                    () -> service.submit(CONTRACT_ID, approverOnlyRequest(), OWNER));
+            when(contractRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+            service.submit(CONTRACT_ID, approverOnlyRequest(), OWNER);
+
+            verify(minioClient).removeObject(any(RemoveObjectArgs.class));
+
+            ArgumentCaptor<Contract> captor = ArgumentCaptor.forClass(Contract.class);
+            verify(contractRepository).save(captor.capture());
+            assertNull(captor.getValue().getSignedPdfKey());
+        }
+
+        @Test
+        @DisplayName("resubmit appends modification request with role 'contractor'")
+        void resubmit_appendsModificationRequest() {
+            Contract c = rejectedContract(ContractStatus.REJECTED_BY_REVIEWER);
+            c.setParticipants(new ArrayList<>());
+
+            when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
+            when(contractRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+            service.submit(CONTRACT_ID, approverOnlyRequest(), OWNER);
+
+            ArgumentCaptor<Contract> captor = ArgumentCaptor.forClass(Contract.class);
+            verify(contractRepository).save(captor.capture());
+            List<ModificationRequest> mods = captor.getValue().getModificationRequests();
+            assertFalse(mods.isEmpty());
+            assertEquals("contractor", mods.get(mods.size() - 1).getRole());
+        }
+
+        @Test
+        @DisplayName("resubmit with externalSigningIncluded=true stores new externalSigners")
+        void resubmit_externalSigners_stored() {
+            Contract c = rejectedContract(ContractStatus.REJECTED_BY_REVIEWER);
+            c.setParticipants(new ArrayList<>());
+
+            when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
+            when(contractRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+            FlowSubmitRequest req = approverOnlyRequest();
+            req.setExternalSigningIncluded(true);
+            ExternalSignerAssignment ext = new ExternalSignerAssignment();
+            ext.setEmail("client@example.com");
+            ext.setOrder(1);
+            req.setExternalSigners(List.of(ext));
+
+            service.submit(CONTRACT_ID, req, OWNER);
+
+            ArgumentCaptor<Contract> captor = ArgumentCaptor.forClass(Contract.class);
+            verify(contractRepository).save(captor.capture());
+            Contract saved = captor.getValue();
+            assertTrue(saved.isExternalSigningIncluded());
+            assertNotNull(saved.getPendingExternalSigners());
+            assertEquals(1, saved.getPendingExternalSigners().size());
+        }
+
+        @Test
+        @DisplayName("resubmit with externalSigningIncluded=false clears pendingExternalSigners")
+        void resubmit_externalSigningFalse_clearsPendingSigners() {
+            Contract c = rejectedContract(ContractStatus.REJECTED_BY_APPROVER);
+            c.setParticipants(new ArrayList<>());
+            ExternalSignerAssignment old = new ExternalSignerAssignment();
+            old.setEmail("old@example.com");
+            c.setPendingExternalSigners(new ArrayList<>(List.of(old)));
+
+            when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
+            when(contractRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+            service.submit(CONTRACT_ID, approverOnlyRequest(), OWNER);
+
+            ArgumentCaptor<Contract> captor = ArgumentCaptor.forClass(Contract.class);
+            verify(contractRepository).save(captor.capture());
+            assertNull(captor.getValue().getPendingExternalSigners());
         }
     }
 
@@ -478,6 +564,23 @@ class UnifiedWorkflowServiceTest {
         }
 
         @Test
+        @DisplayName("xfdfData saved when provided")
+        void xfdfData_savedWhenProvided() {
+            Contract c = inReviewContract();
+            when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
+            when(contractRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+            FlowFieldEditRequest req = new FlowFieldEditRequest();
+            req.setXfdfData("<?xml version=\"1.0\"?><xfdf/>");
+
+            service.saveFieldEdits(CONTRACT_ID, req, REVIEWER_EMAIL);
+
+            ArgumentCaptor<Contract> captor = ArgumentCaptor.forClass(Contract.class);
+            verify(contractRepository).save(captor.capture());
+            assertEquals("<?xml version=\"1.0\"?><xfdf/>", captor.getValue().getXfdfData());
+        }
+
+        @Test
         @DisplayName("non-participant → BadRequestException")
         void nonParticipant_throws() {
             Contract c = inReviewContract();
@@ -535,9 +638,8 @@ class UnifiedWorkflowServiceTest {
             Contract c = draftContract();
             c.setStatus(ContractStatus.IN_REVIEW);
             c.setCurrentParticipantOrder(1);
-            WorkflowParticipant r =
-                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "in_progress");
-            c.setParticipants(new ArrayList<>(List.of(r)));
+            c.setParticipants(new ArrayList<>(List.of(
+                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "in_progress"))));
             c.setFormFields(new ArrayList<>());
             return c;
         }
@@ -546,13 +648,33 @@ class UnifiedWorkflowServiceTest {
             Contract c = draftContract();
             c.setStatus(ContractStatus.IN_APPROVAL);
             c.setCurrentParticipantOrder(2);
-            WorkflowParticipant reviewer =
-                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "completed");
-            WorkflowParticipant approver =
-                    participant(APPROVER_EMAIL, ParticipantRole.APPROVER, 2, "in_progress");
-            c.setParticipants(new ArrayList<>(List.of(reviewer, approver)));
+            c.setParticipants(new ArrayList<>(List.of(
+                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "completed"),
+                    participant(APPROVER_EMAIL, ParticipantRole.APPROVER, 2, "in_progress"))));
             c.setFormFields(new ArrayList<>());
             return c;
+        }
+
+        @Test
+        @DisplayName("reviewer completes — PDF finalized to _signed.pdf, fileUploaded set true")
+        void reviewer_pdfFinalizedAndFileUploadedTrue() throws Exception {
+            Contract c = reviewerActiveContract();
+            when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
+            when(contractRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+            service.markComplete(CONTRACT_ID, completeRequestWithUpload(), REVIEWER_EMAIL);
+
+            verify(customMinioClient).finishMultipartUpload(
+                    eq("test-bucket"),
+                    eq("contracts/" + CONTRACT_ID + "_signed.pdf"),
+                    eq("upload-xyz"),
+                    any());
+
+            ArgumentCaptor<Contract> captor = ArgumentCaptor.forClass(Contract.class);
+            verify(contractRepository).save(captor.capture());
+            Contract saved = captor.getValue();
+            assertTrue(saved.isFileUploaded());
+            assertEquals("contracts/" + CONTRACT_ID + "_signed.pdf", saved.getSignedPdfKey());
         }
 
         @Test
@@ -565,10 +687,7 @@ class UnifiedWorkflowServiceTest {
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
             when(contractRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-            FlowCompleteRequest req = new FlowCompleteRequest();
-            req.setComments("LGTM");
-
-            service.markComplete(CONTRACT_ID, req, REVIEWER_EMAIL);
+            service.markComplete(CONTRACT_ID, completeRequestWithUpload(), REVIEWER_EMAIL);
 
             ArgumentCaptor<Contract> captor = ArgumentCaptor.forClass(Contract.class);
             verify(contractRepository).save(captor.capture());
@@ -579,7 +698,6 @@ class UnifiedWorkflowServiceTest {
                     .findFirst().orElseThrow();
             assertEquals("completed", done.getStatus());
             assertNotNull(done.getCompletedAt());
-            assertEquals("LGTM", done.getComments());
 
             WorkflowParticipant unlocked = saved.getParticipants().stream()
                     .filter(p -> p.getEmail().equalsIgnoreCase(APPROVER_EMAIL))
@@ -597,7 +715,7 @@ class UnifiedWorkflowServiceTest {
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
             when(contractRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-            service.markComplete(CONTRACT_ID, new FlowCompleteRequest(), REVIEWER_EMAIL);
+            service.markComplete(CONTRACT_ID, completeRequestWithUpload(), REVIEWER_EMAIL);
 
             ArgumentCaptor<Contract> captor = ArgumentCaptor.forClass(Contract.class);
             verify(contractRepository).save(captor.capture());
@@ -608,47 +726,42 @@ class UnifiedWorkflowServiceTest {
         }
 
         @Test
-        @DisplayName("reviewer providing uploadId → BadRequestException")
-        void reviewer_withUploadId_throws() {
+        @DisplayName("reviewer missing uploadId → BadRequestException")
+        void reviewer_missingUploadId_throws() {
             Contract c = reviewerActiveContract();
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
 
             FlowCompleteRequest req = new FlowCompleteRequest();
-            req.setUploadId("some-upload");
-            assertThrows(BadRequestException.class,
-                    () -> service.markComplete(CONTRACT_ID, req, REVIEWER_EMAIL));
-        }
-
-        @Test
-        @DisplayName("reviewer providing parts → BadRequestException")
-        void reviewer_withParts_throws() {
-            Contract c = reviewerActiveContract();
-            when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
-
             FlowCompleteRequest.Part part = new FlowCompleteRequest.Part();
             part.setPartNumber(1);
             part.setEtag("etag");
-            FlowCompleteRequest req = new FlowCompleteRequest();
             req.setParts(List.of(part));
+            // no uploadId
             assertThrows(BadRequestException.class,
                     () -> service.markComplete(CONTRACT_ID, req, REVIEWER_EMAIL));
         }
 
         @Test
-        @DisplayName("approver completes with PDF — finishMultipartUpload called, version incremented, signedPdfKey set")
+        @DisplayName("reviewer missing parts → BadRequestException")
+        void reviewer_missingParts_throws() {
+            Contract c = reviewerActiveContract();
+            when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
+
+            FlowCompleteRequest req = new FlowCompleteRequest();
+            req.setUploadId("upload-id");
+            // no parts
+            assertThrows(BadRequestException.class,
+                    () -> service.markComplete(CONTRACT_ID, req, REVIEWER_EMAIL));
+        }
+
+        @Test
+        @DisplayName("approver completes — PDF finalized, version incremented, signedPdfKey set, fileUploaded true")
         void approverCompletes_pdfUploaded() throws Exception {
             Contract c = approverActiveContract();
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
             when(contractRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-            FlowCompleteRequest.Part part = new FlowCompleteRequest.Part();
-            part.setPartNumber(1);
-            part.setEtag("etag-abc");
-            FlowCompleteRequest req = new FlowCompleteRequest();
-            req.setUploadId("upload-xyz");
-            req.setParts(List.of(part));
-
-            service.markComplete(CONTRACT_ID, req, APPROVER_EMAIL);
+            service.markComplete(CONTRACT_ID, completeRequestWithUpload(), APPROVER_EMAIL);
 
             verify(customMinioClient).finishMultipartUpload(
                     eq("test-bucket"),
@@ -666,6 +779,7 @@ class UnifiedWorkflowServiceTest {
             assertEquals("completed", doneApprover.getStatus());
             assertEquals(1, saved.getVersion());
             assertEquals("contracts/" + CONTRACT_ID + "_signed.pdf", saved.getSignedPdfKey());
+            assertTrue(saved.isFileUploaded());
         }
 
         @Test
@@ -675,14 +789,7 @@ class UnifiedWorkflowServiceTest {
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
             when(contractRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-            FlowCompleteRequest.Part part = new FlowCompleteRequest.Part();
-            part.setPartNumber(1);
-            part.setEtag("etag-abc");
-            FlowCompleteRequest req = new FlowCompleteRequest();
-            req.setUploadId("upload-xyz");
-            req.setParts(List.of(part));
-
-            service.markComplete(CONTRACT_ID, req, APPROVER_EMAIL);
+            service.markComplete(CONTRACT_ID, completeRequestWithUpload(), APPROVER_EMAIL);
 
             ArgumentCaptor<Contract> captor = ArgumentCaptor.forClass(Contract.class);
             verify(contractRepository).save(captor.capture());
@@ -723,7 +830,7 @@ class UnifiedWorkflowServiceTest {
             Contract c = reviewerActiveContract();
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
             assertThrows(BadRequestException.class,
-                    () -> service.markComplete(CONTRACT_ID, new FlowCompleteRequest(),
+                    () -> service.markComplete(CONTRACT_ID, completeRequestWithUpload(),
                             "stranger@test.com"));
         }
 
@@ -734,7 +841,7 @@ class UnifiedWorkflowServiceTest {
             c.getParticipants().get(0).setStatus("pending");
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
             assertThrows(BadRequestException.class,
-                    () -> service.markComplete(CONTRACT_ID, new FlowCompleteRequest(),
+                    () -> service.markComplete(CONTRACT_ID, completeRequestWithUpload(),
                             REVIEWER_EMAIL));
         }
 
@@ -746,7 +853,7 @@ class UnifiedWorkflowServiceTest {
                     participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "in_progress"))));
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
             assertThrows(BadRequestException.class,
-                    () -> service.markComplete(CONTRACT_ID, new FlowCompleteRequest(),
+                    () -> service.markComplete(CONTRACT_ID, completeRequestWithUpload(),
                             REVIEWER_EMAIL));
         }
     }
@@ -760,16 +867,15 @@ class UnifiedWorkflowServiceTest {
             Contract c = draftContract();
             c.setStatus(ContractStatus.IN_REVIEW);
             c.setCurrentParticipantOrder(1);
-            WorkflowParticipant r =
-                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "in_progress");
-            c.setParticipants(new ArrayList<>(List.of(r)));
+            c.setParticipants(new ArrayList<>(List.of(
+                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "in_progress"))));
             c.setModificationRequests(new ArrayList<>());
             return c;
         }
 
         @Test
-        @DisplayName("reviewer rejects — REJECTED status, participant marked rejected, mod appended with role 'reviewer'")
-        void reviewerRejects_setsRejected() {
+        @DisplayName("reviewer rejects → REJECTED_BY_REVIEWER, participant marked rejected, mod role='reviewer'")
+        void reviewerRejects_setsRejectedByReviewer() {
             Contract c = inReviewActiveContract();
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
             when(contractRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
@@ -783,7 +889,7 @@ class UnifiedWorkflowServiceTest {
             verify(contractRepository).save(captor.capture());
             Contract saved = captor.getValue();
 
-            assertEquals(ContractStatus.REJECTED, saved.getStatus());
+            assertEquals(ContractStatus.REJECTED_BY_REVIEWER, saved.getStatus());
 
             WorkflowParticipant p = saved.getParticipants().get(0);
             assertEquals("rejected", p.getStatus());
@@ -798,8 +904,8 @@ class UnifiedWorkflowServiceTest {
         }
 
         @Test
-        @DisplayName("approver rejects — REJECTED status, mod role is 'approver'")
-        void approverRejects_setsRejected() {
+        @DisplayName("approver rejects → REJECTED_BY_APPROVER, mod role='approver'")
+        void approverRejects_setsRejectedByApprover() {
             Contract c = draftContract();
             c.setStatus(ContractStatus.IN_APPROVAL);
             c.setCurrentParticipantOrder(1);
@@ -819,7 +925,7 @@ class UnifiedWorkflowServiceTest {
             verify(contractRepository).save(captor.capture());
             Contract saved = captor.getValue();
 
-            assertEquals(ContractStatus.REJECTED, saved.getStatus());
+            assertEquals(ContractStatus.REJECTED_BY_APPROVER, saved.getStatus());
             assertEquals("approver", saved.getModificationRequests().get(0).getRole());
         }
 
@@ -868,19 +974,32 @@ class UnifiedWorkflowServiceTest {
     @DisplayName("initiateUpload")
     class InitiateUpload {
 
-        private Contract approvalContract() {
+        @Test
+        @DisplayName("active reviewer in IN_REVIEW gets uploadId")
+        void reviewer_inReview_getsUploadId() throws Exception {
+            Contract c = draftContract();
+            c.setStatus(ContractStatus.IN_REVIEW);
+            c.setCurrentParticipantOrder(1);
+            c.setParticipants(new ArrayList<>(List.of(
+                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "unlocked"))));
+            when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
+            when(customMinioClient.startMultipartUpload(
+                    "test-bucket", "contracts/" + CONTRACT_ID + "_signed.pdf"))
+                    .thenReturn("upload-id-reviewer");
+
+            SignUploadInitResponse resp = service.initiateUpload(CONTRACT_ID, REVIEWER_EMAIL);
+
+            assertEquals("upload-id-reviewer", resp.getUploadId());
+        }
+
+        @Test
+        @DisplayName("active approver in IN_APPROVAL gets uploadId")
+        void approver_inApproval_getsUploadId() throws Exception {
             Contract c = draftContract();
             c.setStatus(ContractStatus.IN_APPROVAL);
             c.setCurrentParticipantOrder(1);
             c.setParticipants(new ArrayList<>(List.of(
                     participant(APPROVER_EMAIL, ParticipantRole.APPROVER, 1, "unlocked"))));
-            return c;
-        }
-
-        @Test
-        @DisplayName("active approver gets uploadId from MinIO")
-        void approver_getsUploadId() throws Exception {
-            Contract c = approvalContract();
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
             when(customMinioClient.startMultipartUpload(
                     "test-bucket", "contracts/" + CONTRACT_ID + "_signed.pdf"))
@@ -889,35 +1008,19 @@ class UnifiedWorkflowServiceTest {
             SignUploadInitResponse resp = service.initiateUpload(CONTRACT_ID, APPROVER_EMAIL);
 
             assertEquals("upload-id-123", resp.getUploadId());
-            verify(customMinioClient).startMultipartUpload(
-                    "test-bucket", "contracts/" + CONTRACT_ID + "_signed.pdf");
         }
 
         @Test
-        @DisplayName("contract not IN_APPROVAL → BadRequestException")
-        void notInApproval_throws() {
+        @DisplayName("wrong status (READY_FOR_SIGNATURE) → BadRequestException")
+        void wrongStatus_throws() {
             Contract c = draftContract();
-            c.setStatus(ContractStatus.IN_REVIEW);
+            c.setStatus(ContractStatus.READY_FOR_SIGNATURE);
             c.setParticipants(new ArrayList<>(List.of(
-                    participant(APPROVER_EMAIL, ParticipantRole.APPROVER, 1, "unlocked"))));
+                    participant(APPROVER_EMAIL, ParticipantRole.APPROVER, 1, "completed"))));
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
 
             assertThrows(BadRequestException.class,
                     () -> service.initiateUpload(CONTRACT_ID, APPROVER_EMAIL));
-        }
-
-        @Test
-        @DisplayName("reviewer role calling initiateUpload → BadRequestException")
-        void reviewer_throws() {
-            Contract c = draftContract();
-            c.setStatus(ContractStatus.IN_APPROVAL);
-            c.setCurrentParticipantOrder(1);
-            c.setParticipants(new ArrayList<>(List.of(
-                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "unlocked"))));
-            when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
-
-            assertThrows(BadRequestException.class,
-                    () -> service.initiateUpload(CONTRACT_ID, REVIEWER_EMAIL));
         }
 
         @Test
@@ -934,45 +1037,41 @@ class UnifiedWorkflowServiceTest {
     @DisplayName("getPresignedPartUrl")
     class GetPresignedPartUrl {
 
-        private Contract approvalContract() {
+        private Contract reviewInProgressContract() {
             Contract c = draftContract();
-            c.setStatus(ContractStatus.IN_APPROVAL);
+            c.setStatus(ContractStatus.IN_REVIEW);
             c.setCurrentParticipantOrder(1);
             c.setParticipants(new ArrayList<>(List.of(
-                    participant(APPROVER_EMAIL, ParticipantRole.APPROVER, 1, "unlocked"))));
+                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "unlocked"))));
             return c;
         }
 
         @Test
         @DisplayName("partNumber 0 → BadRequestException")
         void partNumberZero_throws() {
-            Contract c = approvalContract();
+            Contract c = reviewInProgressContract();
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
             assertThrows(BadRequestException.class,
-                    () -> service.getPresignedPartUrl(CONTRACT_ID, "upload-id", 0, APPROVER_EMAIL));
+                    () -> service.getPresignedPartUrl(CONTRACT_ID, "upload-id", 0, REVIEWER_EMAIL));
         }
 
         @Test
         @DisplayName("partNumber 10001 → BadRequestException")
         void partNumberTooHigh_throws() {
-            Contract c = approvalContract();
+            Contract c = reviewInProgressContract();
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
             assertThrows(BadRequestException.class,
-                    () -> service.getPresignedPartUrl(CONTRACT_ID, "upload-id", 10001,
-                            APPROVER_EMAIL));
+                    () -> service.getPresignedPartUrl(CONTRACT_ID, "upload-id", 10001, REVIEWER_EMAIL));
         }
 
         @Test
-        @DisplayName("reviewer calling presign (not IN_APPROVAL) → BadRequestException")
-        void nonApprover_throws() {
-            Contract c = draftContract();
-            c.setStatus(ContractStatus.IN_REVIEW);
-            c.setParticipants(new ArrayList<>(List.of(
-                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "unlocked"))));
+        @DisplayName("active reviewer in IN_REVIEW can get presigned URL")
+        void reviewer_inReview_canPresign() throws Exception {
+            Contract c = reviewInProgressContract();
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
-            assertThrows(BadRequestException.class,
-                    () -> service.getPresignedPartUrl(CONTRACT_ID, "upload-id", 1,
-                            REVIEWER_EMAIL));
+
+            assertDoesNotThrow(
+                    () -> service.getPresignedPartUrl(CONTRACT_ID, "upload-id", 1, REVIEWER_EMAIL));
         }
 
         @Test
@@ -980,8 +1079,7 @@ class UnifiedWorkflowServiceTest {
         void notFound_throws() {
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.empty());
             assertThrows(NotFoundException.class,
-                    () -> service.getPresignedPartUrl(CONTRACT_ID, "upload-id", 1,
-                            APPROVER_EMAIL));
+                    () -> service.getPresignedPartUrl(CONTRACT_ID, "upload-id", 1, APPROVER_EMAIL));
         }
     }
 
@@ -1032,14 +1130,15 @@ class UnifiedWorkflowServiceTest {
         }
 
         @Test
-        @DisplayName("reviewer role (not IN_APPROVAL) → BadRequestException")
-        void nonApproverRole_throws() {
+        @DisplayName("active reviewer in IN_REVIEW can abort upload")
+        void reviewer_inReview_canAbort() throws Exception {
             Contract c = draftContract();
             c.setStatus(ContractStatus.IN_REVIEW);
             c.setParticipants(new ArrayList<>(List.of(
                     participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "unlocked"))));
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
-            assertThrows(BadRequestException.class,
+
+            assertDoesNotThrow(
                     () -> service.abortUpload(CONTRACT_ID, "upload-id", REVIEWER_EMAIL));
         }
     }
@@ -1078,7 +1177,7 @@ class UnifiedWorkflowServiceTest {
             when(signatureService.submitForSignature(eq(CONTRACT_ID), any(), eq(OWNER)))
                     .thenReturn(new ContractResponse(c));
 
-            ContractResponse result = service.sendForSignature(CONTRACT_ID, sigRequest(), OWNER);
+            ContractResponse result = service.sendForSignature(CONTRACT_ID, externalSignerRequest(), OWNER);
 
             assertNotNull(result);
             verify(signatureService).submitForSignature(eq(CONTRACT_ID), any(), eq(OWNER));
@@ -1090,7 +1189,7 @@ class UnifiedWorkflowServiceTest {
             Contract c = readyContract();
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
             assertThrows(NotFoundException.class,
-                    () -> service.sendForSignature(CONTRACT_ID, sigRequest(), "other@test.com"));
+                    () -> service.sendForSignature(CONTRACT_ID, externalSignerRequest(), "other@test.com"));
         }
 
         @Test
@@ -1100,7 +1199,7 @@ class UnifiedWorkflowServiceTest {
             c.setStatus(ContractStatus.IN_REVIEW);
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
             assertThrows(BadRequestException.class,
-                    () -> service.sendForSignature(CONTRACT_ID, sigRequest(), OWNER));
+                    () -> service.sendForSignature(CONTRACT_ID, externalSignerRequest(), OWNER));
         }
 
         @Test
@@ -1110,7 +1209,7 @@ class UnifiedWorkflowServiceTest {
             c.setFileUploaded(false);
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
             assertThrows(BadRequestException.class,
-                    () -> service.sendForSignature(CONTRACT_ID, sigRequest(), OWNER));
+                    () -> service.sendForSignature(CONTRACT_ID, externalSignerRequest(), OWNER));
         }
 
         @Test
@@ -1121,8 +1220,28 @@ class UnifiedWorkflowServiceTest {
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
 
             BadRequestException ex = assertThrows(BadRequestException.class,
-                    () -> service.sendForSignature(CONTRACT_ID, sigRequest(), OWNER));
+                    () -> service.sendForSignature(CONTRACT_ID, externalSignerRequest(), OWNER));
             assertTrue(ex.getMessage().contains("CEO Name"));
+        }
+
+        @Test
+        @DisplayName("internal signer type in assignments → BadRequestException")
+        void internalSigner_rejected() {
+            Contract c = readyContract();
+            when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
+
+            SubmitForSignatureRequest req = new SubmitForSignatureRequest();
+            SignerAssignmentDto signer = new SignerAssignmentDto();
+            signer.setEmail("internal@company.com");
+            signer.setType("internal");
+            signer.setPartyId("p-internal");
+            signer.setPartyLabel("Our Company");
+            signer.setOrder(1);
+            req.setAssignments(List.of(signer));
+
+            BadRequestException ex = assertThrows(BadRequestException.class,
+                    () -> service.sendForSignature(CONTRACT_ID, req, OWNER));
+            assertTrue(ex.getMessage().contains("internal@company.com"));
         }
 
         @Test
@@ -1148,8 +1267,7 @@ class UnifiedWorkflowServiceTest {
             when(signatureService.submitForSignature(eq(CONTRACT_ID), any(), eq(OWNER)))
                     .thenReturn(new ContractResponse(c));
 
-            assertDoesNotThrow(() -> service.sendForSignature(CONTRACT_ID, sigRequest(), OWNER));
-            verify(signatureService).submitForSignature(eq(CONTRACT_ID), any(), eq(OWNER));
+            assertDoesNotThrow(() -> service.sendForSignature(CONTRACT_ID, externalSignerRequest(), OWNER));
         }
 
         @Test
@@ -1162,7 +1280,7 @@ class UnifiedWorkflowServiceTest {
             when(signatureService.submitForSignature(eq(CONTRACT_ID), any(), eq(OWNER)))
                     .thenReturn(new ContractResponse(c));
 
-            assertDoesNotThrow(() -> service.sendForSignature(CONTRACT_ID, sigRequest(), OWNER));
+            assertDoesNotThrow(() -> service.sendForSignature(CONTRACT_ID, externalSignerRequest(), OWNER));
         }
 
         @Test
@@ -1175,7 +1293,7 @@ class UnifiedWorkflowServiceTest {
             when(signatureService.submitForSignature(eq(CONTRACT_ID), any(), eq(OWNER)))
                     .thenReturn(new ContractResponse(c));
 
-            assertDoesNotThrow(() -> service.sendForSignature(CONTRACT_ID, sigRequest(), OWNER));
+            assertDoesNotThrow(() -> service.sendForSignature(CONTRACT_ID, externalSignerRequest(), OWNER));
         }
     }
 
@@ -1339,9 +1457,7 @@ class UnifiedWorkflowServiceTest {
             when(contractRepository.findByParticipantsEmail(REVIEWER_EMAIL.toLowerCase()))
                     .thenReturn(List.of(c));
 
-            List<ContractListResponse> inbox = service.getFlowInbox(REVIEWER_EMAIL);
-
-            assertTrue(inbox.isEmpty());
+            assertTrue(service.getFlowInbox(REVIEWER_EMAIL).isEmpty());
         }
 
         @Test
@@ -1354,13 +1470,24 @@ class UnifiedWorkflowServiceTest {
             when(contractRepository.findByParticipantsEmail(REVIEWER_EMAIL.toLowerCase()))
                     .thenReturn(List.of(c));
 
-            List<ContractListResponse> inbox = service.getFlowInbox(REVIEWER_EMAIL);
-
-            assertTrue(inbox.isEmpty());
+            assertTrue(service.getFlowInbox(REVIEWER_EMAIL).isEmpty());
         }
 
         @Test
-        @DisplayName("multiple contracts — only contracts with active (unlocked/in_progress) tasks returned")
+        @DisplayName("rejected participant NOT in inbox")
+        void rejectedParticipant_notInInbox() {
+            Contract c = draftContract();
+            c.setParticipants(List.of(
+                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "rejected")));
+
+            when(contractRepository.findByParticipantsEmail(REVIEWER_EMAIL.toLowerCase()))
+                    .thenReturn(List.of(c));
+
+            assertTrue(service.getFlowInbox(REVIEWER_EMAIL).isEmpty());
+        }
+
+        @Test
+        @DisplayName("multiple contracts — only contracts with active tasks returned")
         void multipleContracts_onlyActiveReturned() {
             Contract c1 = draftContract();
             c1.setId("c1");
@@ -1389,9 +1516,126 @@ class UnifiedWorkflowServiceTest {
             when(contractRepository.findByParticipantsEmail(REVIEWER_EMAIL.toLowerCase()))
                     .thenReturn(Collections.emptyList());
 
-            List<ContractListResponse> inbox = service.getFlowInbox(REVIEWER_EMAIL);
+            assertTrue(service.getFlowInbox(REVIEWER_EMAIL).isEmpty());
+        }
+    }
 
-            assertTrue(inbox.isEmpty());
+    // ─────────────────────────────────────────────────────────────────────────
+    @Nested
+    @DisplayName("getFlowSent")
+    class GetFlowSent {
+
+        @Test
+        @DisplayName("completed participant appears in sent tab")
+        void completedParticipant_inSent() {
+            Contract c = draftContract();
+            c.setId("c1");
+            c.setStatus(ContractStatus.IN_APPROVAL);
+            c.setParticipants(List.of(
+                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "completed")));
+
+            when(contractRepository.findByParticipantsEmail(REVIEWER_EMAIL.toLowerCase()))
+                    .thenReturn(List.of(c));
+
+            List<ContractListResponse> sent = service.getFlowSent(REVIEWER_EMAIL);
+
+            assertEquals(1, sent.size());
+            assertEquals("c1", sent.get(0).getId());
+        }
+
+        @Test
+        @DisplayName("rejected participant appears in sent tab")
+        void rejectedParticipant_inSent() {
+            Contract c = draftContract();
+            c.setId("c2");
+            c.setStatus(ContractStatus.REJECTED_BY_REVIEWER);
+            c.setParticipants(List.of(
+                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "rejected")));
+
+            when(contractRepository.findByParticipantsEmail(REVIEWER_EMAIL.toLowerCase()))
+                    .thenReturn(List.of(c));
+
+            List<ContractListResponse> sent = service.getFlowSent(REVIEWER_EMAIL);
+
+            assertEquals(1, sent.size());
+            assertEquals("c2", sent.get(0).getId());
+        }
+
+        @Test
+        @DisplayName("unlocked participant NOT in sent tab")
+        void unlockedParticipant_notInSent() {
+            Contract c = draftContract();
+            c.setParticipants(List.of(
+                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "unlocked")));
+
+            when(contractRepository.findByParticipantsEmail(REVIEWER_EMAIL.toLowerCase()))
+                    .thenReturn(List.of(c));
+
+            assertTrue(service.getFlowSent(REVIEWER_EMAIL).isEmpty());
+        }
+
+        @Test
+        @DisplayName("in_progress participant NOT in sent tab")
+        void inProgressParticipant_notInSent() {
+            Contract c = draftContract();
+            c.setParticipants(List.of(
+                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "in_progress")));
+
+            when(contractRepository.findByParticipantsEmail(REVIEWER_EMAIL.toLowerCase()))
+                    .thenReturn(List.of(c));
+
+            assertTrue(service.getFlowSent(REVIEWER_EMAIL).isEmpty());
+        }
+
+        @Test
+        @DisplayName("pending participant NOT in sent tab")
+        void pendingParticipant_notInSent() {
+            Contract c = draftContract();
+            c.setParticipants(List.of(
+                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "pending")));
+
+            when(contractRepository.findByParticipantsEmail(REVIEWER_EMAIL.toLowerCase()))
+                    .thenReturn(List.of(c));
+
+            assertTrue(service.getFlowSent(REVIEWER_EMAIL).isEmpty());
+        }
+
+        @Test
+        @DisplayName("multiple contracts — completed and rejected both appear, active excluded")
+        void multipleContracts_completedAndRejectedIncluded_activeExcluded() {
+            Contract completed = draftContract();
+            completed.setId("c-done");
+            completed.setParticipants(List.of(
+                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "completed")));
+
+            Contract rejected = draftContract();
+            rejected.setId("c-rejected");
+            rejected.setParticipants(List.of(
+                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "rejected")));
+
+            Contract active = draftContract();
+            active.setId("c-active");
+            active.setParticipants(List.of(
+                    participant(REVIEWER_EMAIL, ParticipantRole.REVIEWER, 1, "unlocked")));
+
+            when(contractRepository.findByParticipantsEmail(REVIEWER_EMAIL.toLowerCase()))
+                    .thenReturn(List.of(completed, rejected, active));
+
+            List<ContractListResponse> sent = service.getFlowSent(REVIEWER_EMAIL);
+
+            assertEquals(2, sent.size());
+            assertTrue(sent.stream().anyMatch(r -> "c-done".equals(r.getId())));
+            assertTrue(sent.stream().anyMatch(r -> "c-rejected".equals(r.getId())));
+            assertFalse(sent.stream().anyMatch(r -> "c-active".equals(r.getId())));
+        }
+
+        @Test
+        @DisplayName("empty repository result → empty sent list")
+        void emptyRepo_emptySent() {
+            when(contractRepository.findByParticipantsEmail(REVIEWER_EMAIL.toLowerCase()))
+                    .thenReturn(Collections.emptyList());
+
+            assertTrue(service.getFlowSent(REVIEWER_EMAIL).isEmpty());
         }
     }
 }

@@ -1,7 +1,7 @@
 # Unified Workflow — Technical Documentation
 
-**Version:** 2.0.0
-**Last Updated:** 2026-07-06
+**Version:** 2.1.0
+**Last Updated:** 2026-07-08
 **Base URL:** `http://localhost:8080`
 **Status:** Production Ready
 
@@ -45,7 +45,7 @@ The key distinction from the legacy `ContractWorkflowService`:
 - Unlocks each participant only after all participants at the previous order number have completed
 - **Both reviewers and approvers** edit org-party form fields, upload the modified PDF, and mark complete — the upload flow is identical for both roles
 - Each participant's upload overwrites the same `_signed.pdf` key — the next participant always works from the most recent version
-- On rejection, the contract returns to `REJECTED`; the owner can resubmit
+- On rejection by a reviewer, the contract returns to `REJECTED_BY_REVIEWER`; on rejection by an approver, it returns to `REJECTED_BY_APPROVER`. Both are eligible for the owner to resubmit
 - After all internal participants are done, the contract moves to `READY_FOR_SIGNATURE`
 - **When `externalSigningIncluded = true`**: External signing is auto-triggered immediately after the last approver completes — no manual action needed. The `externalSigners` list provided at submit time is used automatically.
 - **When `externalSigningIncluded = false`**: Contract reaches `READY_FOR_SIGNATURE` and the owner manually calls `POST /flow/send-for-signature` when ready
@@ -155,9 +155,9 @@ The JWT subject is the user's email address. Spring Security extracts the email 
 | `saveFieldEdits` | Active participant (`unlocked` or `in_progress`) only |
 | `markComplete` | Active participant (`unlocked` or `in_progress`) only |
 | `reject` | Active participant (`unlocked` or `in_progress`) only |
-| `initiateUpload` | Active participant (reviewer OR approver), while status is IN_REVIEW or IN_APPROVAL |
-| `getPresignedPartUrl` | Active participant (reviewer OR approver), while status is IN_REVIEW or IN_APPROVAL |
-| `abortUpload` | Active participant (reviewer OR approver), while status is IN_REVIEW or IN_APPROVAL |
+| `initiateUpload` | Active participant (reviewer **or** approver) while status is `IN_REVIEW` or `IN_APPROVAL` |
+| `getPresignedPartUrl` | Active participant (reviewer **or** approver) while status is `IN_REVIEW` or `IN_APPROVAL` |
+| `abortUpload` | Active participant (reviewer **or** approver) while status is `IN_REVIEW` or `IN_APPROVAL` |
 | `getParticipantFileUrl` | Contract owner OR any participant (any status) |
 | `sendForSignature` | Contract owner only, while status is `READY_FOR_SIGNATURE` |
 | `getFlowStatus` | Contract owner OR any participant |
@@ -241,55 +241,57 @@ In both cases, only `type: "external"` signers are accepted in the signature flo
 | Status | Meaning |
 |---|---|
 | `DRAFT` | Initial state — eligible for unified workflow submission |
-| `REJECTED` | A reviewer or approver rejected the contract — eligible for resubmission |
 | `IN_REVIEW` | Current active participants are REVIEWERs |
 | `IN_APPROVAL` | Current active participants are APPROVERs |
 | `READY_FOR_SIGNATURE` | All internal participants completed — auto-trigger pending, or owner may call send-for-signature |
 | `IN_SIGNATURE` | External signing in progress (managed by SignatureService) |
+| `REJECTED_BY_REVIEWER` | A reviewer rejected the contract — eligible for resubmission |
+| `REJECTED_BY_APPROVER` | An approver rejected the contract — eligible for resubmission |
+| `REJECTED` | Legacy rejection status — also eligible for resubmission (backward compatibility) |
 
 ### 5.2 State Transition Diagram
 
 ```
-                      ┌────────────────────────────────────────────────────────┐
-                      │                  OWNER: submit()                       │
-                      ▼                                                        │
- ┌──────────┐   first role = REVIEWER   ┌───────────┐                         │
- │  DRAFT   │ ────────────────────────▶│ IN_REVIEW │                         │
- └──────────┘                          └─────┬─────┘                         │
-      │                                      │                                │
-      │  first role = APPROVER               │ all reviewers complete         │
-      │                                      ▼                                │
-      │                              ┌─────────────┐                         │
-      └─────────────────────────────▶│ IN_APPROVAL │                         │
-                                     └──────┬──────┘                         │
-                                            │                                 │
-                         ┌──────────────────┤                                 │
-                         │ any participant  │ all approvers complete          │
-                         │ rejects          ▼                                 │
-                         │       ┌────────────────────┐                       │
-                         │       │ READY_FOR_SIGNATURE│                       │
-                         ▼       └────────┬─────┬─────┘                       │
-                   ┌──────────┐           │     │                             │
-                   │ REJECTED │           │     │ externalSigningIncluded=false│
-                   └──────────┘           │     │ owner: sendForSignature()   │
-                         │                │     ▼                             │
-                         │   externalSigning    ┌──────────────┐             │
-                         │   Included=true      │ IN_SIGNATURE │             │
-                         │   auto-trigger ──────▶              │             │
-                         │   fires               └──────────────┘             │
-                         │                                                     │
-                         └─────────────────────────────────────────────────────┘
-                                  OWNER: submit() again (resubmit)
+                      ┌─────────────────────────────────────────────────────────┐
+                      │              OWNER: submit() (resubmit)                 │
+                      ▼                                                         │
+ ┌──────────┐  first role=REVIEWER  ┌───────────┐                              │
+ │  DRAFT   │ ──────────────────── ▶│ IN_REVIEW │                              │
+ └──────────┘                       └─────┬─────┘                              │
+      │                                   │ all at current order complete       │
+      │  first role=APPROVER              ▼                                     │
+      │                           ┌─────────────┐                              │
+      └──────────────────────────▶│ IN_APPROVAL │                              │
+                                  └──────┬──────┘                              │
+                                         │                                      │
+                      ┌──────────────────┤ all approvers complete              │
+                      │ reviewer rejects  │                                     │
+                      ▼                  ▼                                      │
+          ┌─────────────────┐  ┌────────────────────┐                          │
+          │REJECTED_BY_     │  │ READY_FOR_SIGNATURE│                          │
+          │REVIEWER         │  └──────┬──────┬───────┘                          │
+          └────────┬────────┘         │      │ externalSigningIncluded=false    │
+                   │                  │      │ owner: sendForSignature()        │
+                   │  approver rejects│      ▼                                  │
+          ┌────────▼────────┐         │  ┌──────────────┐                      │
+          │REJECTED_BY_     │         │  │ IN_SIGNATURE │                      │
+          │APPROVER         │         │  └──────────────┘                      │
+          └────────┬────────┘         │                                         │
+                   │   externalSigning│Included=true → auto-trigger fires      │
+                   └──────────────────┴─────────────────────────────────────────┘
 ```
 
 ### 5.3 Resubmission After Rejection
 
-The resubmission path depends on **who rejected**:
+Regardless of **who rejected**, the resubmission is always a **full reset**:
 
 ```
-Reviewer rejected  →  Full reset: all participants replaced
-Approver rejected  →  Partial reset: completed reviewers kept, only approvers replaced
+REJECTED_BY_REVIEWER  →  Full reset: all participants replaced, new flow starts from order 1
+REJECTED_BY_APPROVER  →  Full reset: all participants replaced (including previously completed reviewers)
+REJECTED (legacy)     →  Full reset: backward compatible, same behaviour
 ```
+
+The owner must call `PATCH /contracts/{id}` first to update the contract with the fresh template file and metadata, then call `POST /contracts/{id}/flow/submit` to send the updated contract to the new set of participants. When `submit` is called on a rejected contract, the old `_signed.pdf` is deleted from MinIO so participants in the new flow always see the fresh template.
 
 ---
 
@@ -494,7 +496,7 @@ The `role` field value is `"reviewer"` or `"approver"` (lowercase string). This 
 | Rule | Error |
 |---|---|
 | Caller must be the contract owner | 404 Not Found |
-| Contract must be in `DRAFT` or `REJECTED` status | 400 Bad Request |
+| Contract must be in `DRAFT`, `REJECTED`, `REJECTED_BY_REVIEWER`, or `REJECTED_BY_APPROVER` | 400 Bad Request |
 | Participant list must not be empty | 400 Bad Request |
 | At least one `APPROVER` is required | 400 Bad Request |
 | No duplicate order numbers | 400 Bad Request |
@@ -548,9 +550,14 @@ Both roles must complete the multipart PDF upload. There is no role distinction 
 | All `INTERNAL` party form fields must be non-empty (org-gate) | 400 Bad Request |
 | All signers must have `type: "external"` — internal signers are rejected | 400 Bad Request |
 
-### 7.7 Resubmission After Approver Rejection
+### 7.7 Resubmission — "Update and Resubmit" Flow
 
-When the last rejection was by an approver, the new participant list must contain **only APPROVERs**. Passing a `REVIEWER` throws `400 Bad Request`. The completed reviewers from the previous run are automatically preserved.
+Resubmission is always a **full reset** regardless of who rejected. The owner:
+1. Calls `PATCH /contracts/{id}` with fresh metadata, `xfdfData`, `fieldValues`, and `formFields` (from the clean template)
+2. Uploads the new filled PDF via the single-shot or chunked upload endpoint
+3. Calls `POST /contracts/{id}/flow/submit` with a complete new participant list (reviewers + approvers)
+
+On step 3, the backend automatically deletes the old `_signed.pdf` from MinIO and clears `signedPdfKey` so reviewers in the new flow see the fresh template. Any combination of reviewer and approver assignments is valid.
 
 ---
 
@@ -738,7 +745,12 @@ Rejects the contract. The participant's status is set to `rejected`, a `Modifica
 
 **Success Response — 200 OK**
 
-Returns the updated `ContractResponse` with `status: "REJECTED"`.
+Returns the updated `ContractResponse`. The `status` field reflects who rejected:
+
+| Rejector role | Response `status` |
+|---|---|
+| `REVIEWER` | `REJECTED_BY_REVIEWER` |
+| `APPROVER` | `REJECTED_BY_APPROVER` |
 
 **Error Responses**
 
@@ -967,7 +979,7 @@ Array of `ContractListResponse` objects. Empty array if the caller has no active
 
 **`GET /contracts/flow/sent`**
 
-Returns contracts where the caller has **already completed** their participation (status `completed`). This is the read-only view for the "Sent" tab — the caller can view contract details but cannot edit or take any action.
+Returns contracts where the caller has **already completed or rejected** their participation (participant status `completed` or `rejected`). This is the read-only view for the "Sent" tab. The caller can view contract details but cannot edit or take any action. Rejected contracts remain in the sent tab until they are resubmitted and the caller has a new active turn.
 
 **Success Response — 200 OK**
 
@@ -1144,38 +1156,35 @@ Signer 'user@company.com' has type 'internal'.
 
 ## 12. Resubmission After Rejection
 
-When a contract is in `REJECTED` status, the owner calls `POST /contracts/{id}/flow/submit` again.
+When a contract is in `REJECTED_BY_REVIEWER`, `REJECTED_BY_APPROVER`, or `REJECTED` (legacy) status, the owner runs the **"Update and Resubmit"** flow.
 
-### Case A — Last Rejector Was a Reviewer
+### Full Flow (always the same regardless of who rejected)
 
-Full reset. The entire participant list is replaced.
+**Step 1 — Update the contract**
+
+Call `PATCH /contracts/{id}` with the fresh metadata, `xfdfData`, `fieldValues`, and `formFields` from the clean template. Upload the new filled PDF file.
+
+**Step 2 — Resubmit with a new participant list**
 
 ```json
 {
   "participants": [
-    { "email": "newreviewer@example.com", "role": "REVIEWER", "order": 1 },
+    { "email": "reviewer@example.com",    "role": "REVIEWER", "order": 1 },
     { "email": "approver@example.com",    "role": "APPROVER", "order": 2 }
-  ]
+  ],
+  "externalSigningIncluded": false
 }
 ```
 
-The contract starts fresh from order 1.
+Any combination of reviewers and approvers is valid. Resubmission is always a full reset — there is no partial reset. Previously completed reviewers are **not** preserved.
 
-### Case B — Last Rejector Was an Approver
-
-Partial reset. Completed reviewers are **preserved**; only new APPROVERs can be provided.
-
-```json
-{
-  "participants": [
-    { "email": "newapprover@example.com", "role": "APPROVER", "order": 2 }
-  ]
-}
-```
-
-Completed reviewers are automatically merged in. The new approver is immediately `unlocked`. Status becomes `IN_APPROVAL`.
-
-Passing a `REVIEWER` in this case throws `400 Bad Request`.
+**What happens on resubmit (backend):**
+1. The old `contracts/{id}_signed.pdf` is deleted from MinIO
+2. `signedPdfKey` is cleared on the contract
+3. All participants are replaced with the new list
+4. The first participant (lowest order) is unlocked
+5. Status becomes `IN_REVIEW` (if first is REVIEWER) or `IN_APPROVAL` (if first is APPROVER)
+6. A `ModificationRequest` entry with `role: "contractor"` is appended
 
 ### Rejection History
 
@@ -1190,12 +1199,13 @@ Every rejection appends a `ModificationRequest`:
 }
 ```
 
-On resubmission, a `"contractor"` entry is also appended:
+The `role` is `"reviewer"` for reviewer rejections and `"approver"` for approver rejections. On resubmission, a `"contractor"` entry is appended:
+
 ```json
 {
   "requestedBy": "owner@example.com",
   "role":        "contractor",
-  "message":     "Resubmitted after approver rejection",
+  "message":     "Resubmitted after rejection",
   "requestedAt": "2026-07-01T15:00:00"
 }
 ```
@@ -1263,7 +1273,7 @@ All errors follow the global exception handler format:
 | HTTP | Message | Cause |
 |---|---|---|
 | 404 | `Contract not found` | Contract ID does not exist or caller is not the owner |
-| 400 | `Contract must be DRAFT or REJECTED to submit into the unified flow.` | Wrong starting status |
+| 400 | `Contract must be DRAFT or REJECTED to submit into the unified flow.` | Status is not DRAFT / REJECTED / REJECTED_BY_REVIEWER / REJECTED_BY_APPROVER |
 | 400 | `At least one participant is required` | Empty participants list |
 | 400 | `At least one APPROVER is required in the participant list` | Reviewers only |
 | 400 | `Duplicate order numbers are not allowed` | Two participants with same order |
@@ -1283,8 +1293,7 @@ All errors follow the global exception handler format:
 | 400 | `Contract file must be uploaded before sending for signature` | fileUploaded = false |
 | 400 | `Cannot send for external signature — the following org fields are still empty: CEO Name` | Org-gate failure |
 | 400 | `Only external signers are allowed in the unified flow. Signer 'x@y.com' has type 'internal'.` | Internal signer in assignments |
-| 400 | `No rejection record found. Cannot determine resubmission type.` | REJECTED contract with no ModificationRequest |
-| 400 | `When resubmitting after approver rejection, only APPROVER participants can be changed.` | Reviewer in list after approver rejection |
+| 400 | `uploadId is required — upload the edited PDF before marking complete.` | Reviewer missing uploadId (both roles must upload) |
 
 ---
 
@@ -1554,11 +1563,27 @@ The `xfdfData` string represents the full annotation state. Save it on every `/f
 
 ### 16.10 Rejection & Resubmit UI
 
-When `contract.status = REJECTED`:
-- Read `contract.modificationRequests[]` — the last entry with `role = "reviewer"` or `role = "approver"` shows the reason
-- If `lastRejection.role = "reviewer"` → show full participant assignment form (all participants must be re-assigned)
-- If `lastRejection.role = "approver"` → show only approver assignment (reviewers are locked in; display them as read-only)
-- Call `POST /contracts/{id}/flow/submit` with the new list
+When `contract.status` is `REJECTED_BY_REVIEWER`, `REJECTED_BY_APPROVER`, or `REJECTED`:
+- Show an **"Update and Resubmit"** button instead of "Edit and Share"
+- Read `contract.modificationRequests[]` — the last entry with `role = "reviewer"` or `role = "approver"` shows the rejection reason and who rejected
+- Display the rejection reason to the owner so they know what needs to change
+
+**Update and Resubmit flow (identical regardless of who rejected):**
+1. Open the contract metadata dialog — pre-filled with current metadata so owner can update it
+2. Open the PDF editor with the **original blank template** (from `templateId`) — not the old reviewed/signed copy
+3. Owner fills the fresh template and saves via `PATCH /contracts/{id}` (metadata + `xfdfData` + `formFields`)
+4. Owner uploads the filled PDF file
+5. Open the unified flow dialog (same as contract creation)
+6. Owner assigns a completely new set of participants (reviewers + approvers) and submits
+7. Call `POST /contracts/{id}/flow/submit` with the full new participant list
+
+Check the `status` field to determine which badge to show:
+
+| `status` | Badge |
+|---|---|
+| `REJECTED_BY_REVIEWER` | "Rejected by Reviewer" |
+| `REJECTED_BY_APPROVER` | "Rejected by Approver" |
+| `REJECTED` | "Rejected" (legacy) |
 
 ---
 
@@ -1568,18 +1593,18 @@ The unified workflow is covered by unit tests in `UnifiedWorkflowServiceTest.jav
 
 | Test Group | What It Covers |
 |---|---|
-| `submit — fresh DRAFT` | All submission validations, status transitions, participant ordering, externalSigners storage, flag persistence |
-| `submit — resubmit after rejection` | Reviewer rejection full reset, approver rejection partial reset, reviewer-in-list error, no modification records error |
+| `submit — fresh DRAFT` | All submission validations, status transitions, participant ordering, externalSigners storage and validation, flag persistence |
+| `submit — resubmit after rejection` | `REJECTED_BY_REVIEWER` full reset, `REJECTED_BY_APPROVER` full reset (no partial reset), legacy `REJECTED` accepted, `_signed.pdf` deleted from MinIO on resubmit, `signedPdfKey` cleared, mod request appended with role="contractor", externalSigners stored/cleared correctly |
 | `saveFieldEdits` | Status transitions (unlocked → in_progress), field merging, xfdfData save, filledBy attribution, access control, wrong-status guard |
-| `markComplete` | Reviewer and approver completion with upload, advance engine (next order + READY), version increment, signedPdfKey set, fileUploaded=true, missing uploadId/parts errors |
-| `reject` | Reviewer and approver rejection paths, mod request role field, access control, wrong-status guard |
-| `initiateUpload` | Reviewer and approver get uploadId, wrong status blocked, not found |
-| `getPresignedPartUrl` | Part number bounds (0, 10001), non-participant blocked, not found |
-| `abortUpload` | Cancel called with correct args, blank/null uploadId validation, non-participant blocked |
-| `sendForSignature` | Happy path, non-owner 404, wrong status, file not uploaded, org-gate unfilled, external-only validation, org-gate external party skip, no-form-fields pass |
-| `getFlowStatus` | Owner access, participant access, outsider 404, orgFieldsComplete=true/false, formFields/xfdfData/parties in response |
-| `getFlowInbox` | Unlocked in inbox, in_progress in inbox, completed excluded, pending excluded, empty repo |
-| `getFlowSent` | Completed in sent, unlocked excluded, in_progress excluded, empty repo |
+| `markComplete` | **Both reviewer and approver** must provide uploadId + parts; PDF finalized to `_signed.pdf`, `fileUploaded=true` set for both roles; advance engine (next order + READY_FOR_SIGNATURE); version increment on approver; signedPdfKey set; missing uploadId/parts errors for both roles; non-participant and pending-participant guards |
+| `reject` | Reviewer → `REJECTED_BY_REVIEWER` status; approver → `REJECTED_BY_APPROVER` status; mod request role field; access control; wrong-status guard |
+| `initiateUpload` | Reviewer in IN_REVIEW gets uploadId; approver in IN_APPROVAL gets uploadId; wrong status (READY_FOR_SIGNATURE) blocked; not found |
+| `getPresignedPartUrl` | Part number bounds (0, 10001); reviewer in IN_REVIEW can presign; not found |
+| `abortUpload` | Cancel called with correct args; blank/null uploadId validation; reviewer in IN_REVIEW can abort |
+| `sendForSignature` | Happy path; non-owner 404; wrong status; file not uploaded; org-gate unfilled; internal signer type rejected; org-gate external party skip; no-form-fields pass; no-parties pass |
+| `getFlowStatus` | Owner access; participant access; outsider 404; orgFieldsComplete=true/false; unfilled field label in response |
+| `getFlowInbox` | Unlocked in inbox; in_progress in inbox; completed/pending/rejected excluded; multiple contracts filtered correctly; empty repo |
+| `getFlowSent` | Completed in sent; **rejected in sent**; unlocked/in_progress/pending excluded; multiple contracts (completed + rejected included, active excluded); empty repo |
 
 **Running the tests:**
 

@@ -222,17 +222,17 @@ class ContractServiceMergeFieldsTest {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Status guard — formFields update blocked while in review/approval
+    // Status guard — formFields update allowed in non-finalized statuses
     // ─────────────────────────────────────────────────────────────────────────
 
     @Test
-    @DisplayName("throws BadRequestException when contract is in review (cannot be edited)")
-    void shouldThrow_whenContractInReview() {
+    @DisplayName("does NOT throw when contract is IN_REVIEW — formFields update is allowed before finalization")
+    void shouldAllow_formFieldsUpdateWhenInReview() {
         Contract c = draftContract(List.of());
         c.setStatus(ContractStatus.IN_REVIEW);
         when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
 
-        assertThrows(BadRequestException.class, () ->
+        assertDoesNotThrow(() ->
             contractService.updateContract(
                 CONTRACT_ID,
                 requestWithFormFields(List.of(incomingField("sig_1"))),

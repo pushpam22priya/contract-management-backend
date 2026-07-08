@@ -539,35 +539,35 @@ class ContractServiceCrudTest {
     class UpdateContract {
 
         @Test
-        @DisplayName("throws BadRequestException when contract is IN_REVIEW")
-        void shouldThrow_400_whenInReview() {
+        @DisplayName("does NOT throw when contract is IN_REVIEW — owner may edit before finalization")
+        void shouldAllow_editWhenInReview() {
             Contract c = draftContract();
             c.setStatus(ContractStatus.IN_REVIEW);
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
 
-            assertThrows(BadRequestException.class,
+            assertDoesNotThrow(
                     () -> contractService.updateContract(CONTRACT_ID, minimalRequest(), OWNER_EMAIL));
         }
 
         @Test
-        @DisplayName("throws BadRequestException when contract is IN_APPROVAL")
-        void shouldThrow_400_whenInApproval() {
+        @DisplayName("does NOT throw when contract is IN_APPROVAL — owner may edit before finalization")
+        void shouldAllow_editWhenInApproval() {
             Contract c = draftContract();
             c.setStatus(ContractStatus.IN_APPROVAL);
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
 
-            assertThrows(BadRequestException.class,
+            assertDoesNotThrow(
                     () -> contractService.updateContract(CONTRACT_ID, minimalRequest(), OWNER_EMAIL));
         }
 
         @Test
-        @DisplayName("throws BadRequestException when contract is READY_FOR_SIGNATURE")
-        void shouldThrow_400_whenReadyForSignature() {
+        @DisplayName("does NOT throw when contract is READY_FOR_SIGNATURE — owner may edit before finalization")
+        void shouldAllow_editWhenReadyForSignature() {
             Contract c = draftContract();
             c.setStatus(ContractStatus.READY_FOR_SIGNATURE);
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
 
-            assertThrows(BadRequestException.class,
+            assertDoesNotThrow(
                     () -> contractService.updateContract(CONTRACT_ID, minimalRequest(), OWNER_EMAIL));
         }
 

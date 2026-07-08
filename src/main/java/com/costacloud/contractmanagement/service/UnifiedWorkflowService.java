@@ -9,6 +9,7 @@ import com.costacloud.contractmanagement.repository.ContractRepository;
 import com.costacloud.contractmanagement.repository.SignatureRequestRepository;
 import io.minio.GetPresignedObjectUrlArgs;
 import io.minio.MinioClient;
+import io.minio.RemoveObjectArgs;
 import io.minio.StatObjectArgs;
 import io.minio.errors.ErrorResponseException;
 import io.minio.http.Method;
@@ -126,6 +127,20 @@ public class UnifiedWorkflowService {
     private void handleResubmit(Contract contract, FlowSubmitRequest request, String callerEmail) {
         // Contractor has refreshed the full document before resubmitting — always a full reset
         // regardless of whether the rejection was by a reviewer or approver.
+
+        // Delete the stale reviewer/approver-uploaded copy so participants in the new flow
+        // see the fresh template file the owner just uploaded, not the old annotated version.
+        String signedKey = "contracts/" + contract.getId() + "_signed.pdf";
+        try {
+            minioClient.removeObject(RemoveObjectArgs.builder()
+                    .bucket(bucketName)
+                    .object(signedKey)
+                    .build());
+        } catch (Exception e) {
+            log.warn("Could not delete stale signed PDF for contract {}: {}", contract.getId(), e.getMessage());
+        }
+        contract.setSignedPdfKey(null);
+
         List<ParticipantAssignment> newAssignments = request.getParticipants();
         LocalDateTime now = LocalDateTime.now();
 
