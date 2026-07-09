@@ -17,6 +17,10 @@ public class ContractResponse extends ContractListResponse {
     private List<Map<String, Object>> formFields;
     private List<Party> parties;
 
+    // True once a working copy (contracts/{id}_signed.pdf) exists — the frontend uses this to
+    // always read AND write the working copy instead of the original .pdf. Cleared on rejection.
+    private boolean hasSignedCopy;
+
     // ─── Review/Approval detail ───────────────────────────────────
     private List<ReviewerInfo> reviewers;
     private ApproverInfo approver;
@@ -34,6 +38,7 @@ public class ContractResponse extends ContractListResponse {
         this.fieldValues = c.getFieldValues();
         this.formFields = c.getFormFields();
         this.parties = c.getParties();
+        this.hasSignedCopy = c.getSignedPdfKey() != null;
         this.reviewers = c.getReviewers();
         this.approver = c.getApprover();
         this.modificationRequests = c.getModificationRequests();

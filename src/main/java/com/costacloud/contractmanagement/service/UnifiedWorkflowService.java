@@ -7,8 +7,10 @@ import com.costacloud.contractmanagement.exception.NotFoundException;
 import com.costacloud.contractmanagement.model.*;
 import com.costacloud.contractmanagement.repository.ContractRepository;
 import com.costacloud.contractmanagement.repository.SignatureRequestRepository;
+import io.minio.GetObjectArgs;
 import io.minio.GetPresignedObjectUrlArgs;
 import io.minio.MinioClient;
+import io.minio.PutObjectArgs;
 import io.minio.RemoveObjectArgs;
 import io.minio.StatObjectArgs;
 import io.minio.errors.ErrorResponseException;
@@ -23,6 +25,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
@@ -128,18 +132,19 @@ public class UnifiedWorkflowService {
         // Contractor has refreshed the full document before resubmitting — always a full reset
         // regardless of whether the rejection was by a reviewer or approver.
 
-        // Delete the stale reviewer/approver-uploaded copy so participants in the new flow
-        // see the fresh template file the owner just uploaded, not the old annotated version.
+        // Re-create the working copy from the owner's refreshed original, so participants in the new
+        // flow (and the owner) again read/write contracts/{id}_signed.pdf as the single source of
+        // truth — starting from the fresh document the owner just uploaded, not the old annotated one.
+        String originalKey = "contracts/" + contract.getId() + ".pdf";
         String signedKey = "contracts/" + contract.getId() + "_signed.pdf";
         try {
-            minioClient.removeObject(RemoveObjectArgs.builder()
-                    .bucket(bucketName)
-                    .object(signedKey)
-                    .build());
+            copyPdfInMinio(originalKey, signedKey);
+            contract.setSignedPdfKey(signedKey);
         } catch (Exception e) {
-            log.warn("Could not delete stale signed PDF for contract {}: {}", contract.getId(), e.getMessage());
+            log.warn("Could not re-create working copy on resubmit for contract {}: {}",
+                    contract.getId(), e.getMessage());
+            contract.setSignedPdfKey(null);
         }
-        contract.setSignedPdfKey(null);
 
         List<ParticipantAssignment> newAssignments = request.getParticipants();
         LocalDateTime now = LocalDateTime.now();
@@ -331,9 +336,57 @@ public class UnifiedWorkflowService {
                 participant.getRole().name().toLowerCase(),
                 request.getMessage());
 
+        // Archive the in-flight working copy and fall back to the original for the owner's revision.
+        archiveSignedAsRejected(contract);
+
         contract.setUpdatedAt(LocalDateTime.now());
         contractRepository.save(contract);
         return new ContractResponse(contract);
+    }
+
+    /**
+     * On rejection, rename the working copy contracts/{id}_signed.pdf → contracts/{id}_rejected.pdf
+     * (copy + delete) and clear signedPdfKey, so the read resolver falls back to the original
+     * contracts/{id}.pdf. The archived _rejected.pdf is kept for record.
+     */
+    private void archiveSignedAsRejected(Contract contract) {
+        String signedKey = "contracts/" + contract.getId() + "_signed.pdf";
+        if (!objectExistsInMinio(signedKey)) {
+            contract.setSignedPdfKey(null);
+            return;
+        }
+        String rejectedKey = "contracts/" + contract.getId() + "_rejected.pdf";
+        try {
+            copyPdfInMinio(signedKey, rejectedKey);
+            minioClient.removeObject(RemoveObjectArgs.builder()
+                    .bucket(bucketName)
+                    .object(signedKey)
+                    .build());
+            log.info("Archived working copy as {} for rejected contract {}", rejectedKey, contract.getId());
+        } catch (Exception e) {
+            log.warn("Could not archive signed PDF as rejected for contract {}: {}",
+                    contract.getId(), e.getMessage());
+        }
+        contract.setSignedPdfKey(null);
+    }
+
+    /**
+     * Copies a PDF object within the bucket via read + write (same approach as
+     * SignatureService.finalizeContract) rather than server-side copyObject, which is not reliable
+     * in this MinIO deployment.
+     */
+    private void copyPdfInMinio(String srcKey, String dstKey) throws Exception {
+        byte[] bytes;
+        try (InputStream is = minioClient.getObject(
+                GetObjectArgs.builder().bucket(bucketName).object(srcKey).build())) {
+            bytes = is.readAllBytes();
+        }
+        minioClient.putObject(PutObjectArgs.builder()
+                .bucket(bucketName)
+                .object(dstKey)
+                .stream(new ByteArrayInputStream(bytes), bytes.length, -1)
+                .contentType("application/pdf")
+                .build());
     }
 
     // ─── Upload — Approver Only ───────────────────────────────────
@@ -390,9 +443,122 @@ public class UnifiedWorkflowService {
                 bucketName, "contracts/" + id + "_signed.pdf", uploadId);
     }
 
+    // ─── Working Copy — Owner Only ────────────────────────────────
+    // The owner edits the single canonical working copy (contracts/{id}_signed.pdf) — the
+    // same object reviewers/approvers/signers read and write. Allowed until the contract is
+    // finalized. The original contracts/{id}.pdf is left untouched (audit + resubmit reset).
+
+    public SignUploadInitResponse initiateWorkingCopyUpload(String id, String callerEmail) throws Exception {
+        Contract contract = verifyOwnerCanEdit(id, callerEmail);
+
+        String objectKey = "contracts/" + contract.getId() + "_signed.pdf";
+        String uploadId = customMinioClient.startMultipartUpload(bucketName, objectKey);
+        return new SignUploadInitResponse(uploadId);
+    }
+
+    public String getWorkingCopyPresignedPartUrl(String id, String uploadId,
+                                                 int partNumber, String callerEmail) throws Exception {
+        verifyOwnerCanEdit(id, callerEmail);
+
+        if (partNumber < 1 || partNumber > 10000) {
+            throw new BadRequestException("Part number must be between 1 and 10000");
+        }
+
+        String objectKey = "contracts/" + id + "_signed.pdf";
+        Map<String, String> queryParams = new HashMap<>();
+        queryParams.put("uploadId", uploadId);
+        queryParams.put("partNumber", String.valueOf(partNumber));
+
+        return minioClient.getPresignedObjectUrl(
+                GetPresignedObjectUrlArgs.builder()
+                        .method(Method.PUT)
+                        .bucket(bucketName)
+                        .object(objectKey)
+                        .expiry(15, TimeUnit.MINUTES)
+                        .extraQueryParams(queryParams)
+                        .build()
+        );
+    }
+
+    public void abortWorkingCopyUpload(String id, String uploadId, String callerEmail) throws Exception {
+        verifyOwnerCanEdit(id, callerEmail);
+
+        if (uploadId == null || uploadId.isBlank()) {
+            throw new BadRequestException("uploadId is required");
+        }
+
+        customMinioClient.cancelMultipartUpload(
+                bucketName, "contracts/" + id + "_signed.pdf", uploadId);
+    }
+
+    public ContractResponse completeWorkingCopy(String id, FlowCompleteRequest request,
+                                                String callerEmail) throws Exception {
+        Contract contract = verifyOwnerCanEdit(id, callerEmail);
+
+        if (request.getUploadId() == null || request.getUploadId().isBlank()) {
+            throw new BadRequestException("uploadId is required — upload the edited PDF before saving.");
+        }
+        if (request.getParts() == null || request.getParts().isEmpty()) {
+            throw new BadRequestException("parts list is required — complete the multipart upload before saving.");
+        }
+
+        String objectKey = "contracts/" + id + "_signed.pdf";
+        List<Part> parts = new ArrayList<>();
+        for (FlowCompleteRequest.Part p : request.getParts()) {
+            parts.add(new Part(p.getPartNumber(), p.getEtag()));
+        }
+        customMinioClient.finishMultipartUpload(bucketName, objectKey,
+                request.getUploadId(), parts.toArray(new Part[0]));
+        contract.setSignedPdfKey(objectKey);
+        contract.setFileUploaded(true);
+
+        if (request.getFormFields() != null && !request.getFormFields().isEmpty()) {
+            mergeFormFields(contract, request.getFormFields(), callerEmail);
+        }
+        if (request.getFieldValues() != null && !request.getFieldValues().isEmpty()) {
+            Map<String, String> existing = contract.getFieldValues() != null
+                    ? new HashMap<>(contract.getFieldValues())
+                    : new HashMap<>();
+            existing.putAll(request.getFieldValues());
+            contract.setFieldValues(existing);
+        }
+        if (request.getXfdfData() != null) {
+            contract.setXfdfData(request.getXfdfData());
+        }
+
+        // Owner edits neither advance the workflow nor bump the signing version — they only
+        // update the shared working copy in place so every participant sees the latest bytes.
+        contract.setUpdatedAt(LocalDateTime.now());
+        contractRepository.save(contract);
+        return new ContractResponse(contract);
+    }
+
+    /**
+     * Authorizes the caller as the contract owner and ensures the contract is not finalized.
+     * Owner edits to the working copy are permitted in every pre-finalization state.
+     */
+    private Contract verifyOwnerCanEdit(String id, String callerEmail) {
+        Contract contract = contractRepository.findById(id)
+                .orElseThrow(() -> new NotFoundException("Contract not found"));
+
+        if (!contract.getCreatedBy().equalsIgnoreCase(callerEmail)) {
+            throw new NotFoundException("Contract not found");
+        }
+
+        ContractStatus s = contract.getStatus();
+        if (s == ContractStatus.SIGNED
+                || s == ContractStatus.ACTIVE
+                || s == ContractStatus.EXPIRING
+                || s == ContractStatus.EXPIRED
+                || s == ContractStatus.TERMINATED) {
+            throw new BadRequestException("Contract cannot be edited after it has been finalized");
+        }
+        return contract;
+    }
+
     // ─── File URL ─────────────────────────────────────────────────
 
-    public Map<String, String> getParticipantFileUrl(String id, String callerEmail) throws Exception {
+    public Map<String, Object> getParticipantFileUrl(String id, String callerEmail) throws Exception {
         Contract contract = contractRepository.findById(id)
                 .orElseThrow(() -> new NotFoundException("Contract not found"));
 
@@ -406,7 +572,8 @@ public class UnifiedWorkflowService {
 
         String signedKey = "contracts/" + id + "_signed.pdf";
         String originalKey = "contracts/" + id + ".pdf";
-        String objectKey = objectExistsInMinio(signedKey) ? signedKey : originalKey;
+        boolean isSignedCopy = objectExistsInMinio(signedKey);
+        String objectKey = isSignedCopy ? signedKey : originalKey;
 
         String url = minioClient.getPresignedObjectUrl(
                 GetPresignedObjectUrlArgs.builder()
@@ -417,7 +584,9 @@ public class UnifiedWorkflowService {
                         .build()
         );
 
-        return Map.of("url", url);
+        // isSignedCopy tells the client the served binary already has all signatures/values baked in,
+        // so it must NOT overlay XFDF on top (that would wipe baked ink signatures).
+        return Map.of("url", url, "isSignedCopy", isSignedCopy);
     }
 
     // ─── Send for Signature (with org-gate) ──────────────────────

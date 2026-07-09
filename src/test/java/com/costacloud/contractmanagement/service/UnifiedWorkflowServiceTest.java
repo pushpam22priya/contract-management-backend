@@ -6,7 +6,10 @@ import com.costacloud.contractmanagement.exception.BadRequestException;
 import com.costacloud.contractmanagement.exception.NotFoundException;
 import com.costacloud.contractmanagement.model.*;
 import com.costacloud.contractmanagement.repository.ContractRepository;
+import io.minio.GetObjectArgs;
+import io.minio.GetObjectResponse;
 import io.minio.MinioClient;
+import io.minio.PutObjectArgs;
 import io.minio.RemoveObjectArgs;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -399,22 +402,26 @@ class UnifiedWorkflowServiceTest {
         }
 
         @Test
-        @DisplayName("resubmit deletes _signed.pdf from MinIO and clears signedPdfKey")
-        void resubmit_deletesSignedPdf_andClearsSignedPdfKey() throws Exception {
+        @DisplayName("resubmit re-creates _signed.pdf from the original and sets signedPdfKey")
+        void resubmit_recreatesSignedPdf_fromOriginal() throws Exception {
             Contract c = rejectedContract(ContractStatus.REJECTED_BY_APPROVER);
-            c.setSignedPdfKey("contracts/" + CONTRACT_ID + "_signed.pdf");
+            c.setSignedPdfKey(null);
             c.setParticipants(new ArrayList<>());
 
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
             when(contractRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
+            GetObjectResponse mockResp = mock(GetObjectResponse.class);
+            when(mockResp.readAllBytes()).thenReturn(new byte[]{37, 80, 68, 70}); // %PDF
+            when(minioClient.getObject(any(GetObjectArgs.class))).thenReturn(mockResp);
+
             service.submit(CONTRACT_ID, approverOnlyRequest(), OWNER);
 
-            verify(minioClient).removeObject(any(RemoveObjectArgs.class));
+            verify(minioClient).putObject(any(PutObjectArgs.class));
 
             ArgumentCaptor<Contract> captor = ArgumentCaptor.forClass(Contract.class);
             verify(contractRepository).save(captor.capture());
-            assertNull(captor.getValue().getSignedPdfKey());
+            assertEquals("contracts/" + CONTRACT_ID + "_signed.pdf", captor.getValue().getSignedPdfKey());
         }
 
         @Test
@@ -904,6 +911,32 @@ class UnifiedWorkflowServiceTest {
         }
 
         @Test
+        @DisplayName("reject archives _signed.pdf → _rejected.pdf and clears signedPdfKey")
+        void reject_archivesSignedAsRejected() throws Exception {
+            Contract c = inReviewActiveContract();
+            c.setSignedPdfKey("contracts/" + CONTRACT_ID + "_signed.pdf");
+            when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
+            when(contractRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+            GetObjectResponse mockResp = mock(GetObjectResponse.class);
+            when(mockResp.readAllBytes()).thenReturn(new byte[]{37, 80, 68, 70}); // %PDF
+            when(minioClient.getObject(any(GetObjectArgs.class))).thenReturn(mockResp);
+
+            FlowRejectRequest req = new FlowRejectRequest();
+            req.setMessage("Please revise clause 2");
+
+            service.reject(CONTRACT_ID, req, REVIEWER_EMAIL);
+
+            // Working copy copied to _rejected.pdf via read + write, then the _signed.pdf removed
+            verify(minioClient).putObject(any(PutObjectArgs.class));
+            verify(minioClient).removeObject(any(RemoveObjectArgs.class));
+
+            ArgumentCaptor<Contract> captor = ArgumentCaptor.forClass(Contract.class);
+            verify(contractRepository).save(captor.capture());
+            assertNull(captor.getValue().getSignedPdfKey());
+        }
+
+        @Test
         @DisplayName("approver rejects → REJECTED_BY_APPROVER, mod role='approver'")
         void approverRejects_setsRejectedByApprover() {
             Contract c = draftContract();
@@ -1140,6 +1173,99 @@ class UnifiedWorkflowServiceTest {
 
             assertDoesNotThrow(
                     () -> service.abortUpload(CONTRACT_ID, "upload-id", REVIEWER_EMAIL));
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    @Nested
+    @DisplayName("working copy — owner edits")
+    class WorkingCopy {
+
+        @Test
+        @DisplayName("owner initiate in IN_REVIEW gets uploadId for _signed.pdf")
+        void owner_initiate_getsUploadId() throws Exception {
+            Contract c = draftContract();
+            c.setStatus(ContractStatus.IN_REVIEW);
+            when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
+            when(customMinioClient.startMultipartUpload(
+                    "test-bucket", "contracts/" + CONTRACT_ID + "_signed.pdf"))
+                    .thenReturn("owner-upload-1");
+
+            SignUploadInitResponse resp = service.initiateWorkingCopyUpload(CONTRACT_ID, OWNER);
+
+            assertEquals("owner-upload-1", resp.getUploadId());
+        }
+
+        @Test
+        @DisplayName("owner complete — writes _signed.pdf, sets signedPdfKey + fileUploaded, no version bump")
+        void owner_complete_writesSignedPdf_noVersionBump() throws Exception {
+            Contract c = draftContract();
+            c.setStatus(ContractStatus.READY_FOR_SIGNATURE);
+            c.setVersion(3);
+            when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
+            when(contractRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+            service.completeWorkingCopy(CONTRACT_ID, completeRequestWithUpload(), OWNER);
+
+            verify(customMinioClient).finishMultipartUpload(
+                    eq("test-bucket"),
+                    eq("contracts/" + CONTRACT_ID + "_signed.pdf"),
+                    eq("upload-xyz"),
+                    any());
+
+            ArgumentCaptor<Contract> captor = ArgumentCaptor.forClass(Contract.class);
+            verify(contractRepository).save(captor.capture());
+            Contract saved = captor.getValue();
+            assertEquals("contracts/" + CONTRACT_ID + "_signed.pdf", saved.getSignedPdfKey());
+            assertTrue(saved.isFileUploaded());
+            assertEquals(3, saved.getVersion());                       // unchanged — owner edits don't bump version
+            assertEquals(ContractStatus.READY_FOR_SIGNATURE, saved.getStatus()); // status unchanged
+        }
+
+        @Test
+        @DisplayName("owner complete on finalized (SIGNED) → BadRequestException")
+        void owner_complete_finalized_throws() {
+            Contract c = draftContract();
+            c.setStatus(ContractStatus.SIGNED);
+            when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
+
+            assertThrows(BadRequestException.class,
+                    () -> service.completeWorkingCopy(CONTRACT_ID, completeRequestWithUpload(), OWNER));
+        }
+
+        @Test
+        @DisplayName("non-owner → NotFoundException (ownership masking)")
+        void nonOwner_throwsNotFound() {
+            Contract c = draftContract();
+            c.setStatus(ContractStatus.IN_APPROVAL);
+            when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
+
+            assertThrows(NotFoundException.class,
+                    () -> service.completeWorkingCopy(CONTRACT_ID, completeRequestWithUpload(), "stranger@test.com"));
+        }
+
+        @Test
+        @DisplayName("missing uploadId → BadRequestException")
+        void missingUploadId_throws() {
+            Contract c = draftContract();
+            c.setStatus(ContractStatus.IN_REVIEW);
+            when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
+
+            FlowCompleteRequest req = new FlowCompleteRequest();
+            FlowCompleteRequest.Part part = new FlowCompleteRequest.Part();
+            part.setPartNumber(1);
+            part.setEtag("etag");
+            req.setParts(List.of(part));
+            assertThrows(BadRequestException.class,
+                    () -> service.completeWorkingCopy(CONTRACT_ID, req, OWNER));
+        }
+
+        @Test
+        @DisplayName("contract not found → NotFoundException")
+        void notFound_throws() {
+            when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.empty());
+            assertThrows(NotFoundException.class,
+                    () -> service.completeWorkingCopy(CONTRACT_ID, completeRequestWithUpload(), OWNER));
         }
     }
 

@@ -82,10 +82,48 @@ public class UnifiedWorkflowController {
         return ResponseEntity.ok().build();
     }
 
+    @Operation(summary = "Initiate working-copy PDF upload — owner edits the shared _signed working copy (until finalized)")
+    @SecurityRequirement(name = "bearerAuth")
+    @PostMapping("/{id}/working-copy/upload/initiate")
+    public ResponseEntity<SignUploadInitResponse> initiateWorkingCopyUpload(
+            @PathVariable String id) throws Exception {
+        return ResponseEntity.ok(unifiedWorkflowService.initiateWorkingCopyUpload(id, getEmail()));
+    }
+
+    @Operation(summary = "Get presigned URL for a single working-copy upload chunk — owner only")
+    @SecurityRequirement(name = "bearerAuth")
+    @GetMapping("/{id}/working-copy/upload/presign")
+    public ResponseEntity<Map<String, Object>> getWorkingCopyPresignedPartUrl(
+            @PathVariable String id,
+            @RequestParam String uploadId,
+            @RequestParam int partNumber) throws Exception {
+        String url = unifiedWorkflowService.getWorkingCopyPresignedPartUrl(id, uploadId, partNumber, getEmail());
+        return ResponseEntity.ok(Map.of("url", url, "partNumber", partNumber));
+    }
+
+    @Operation(summary = "Abort in-progress working-copy chunked upload — owner only")
+    @SecurityRequirement(name = "bearerAuth")
+    @PostMapping("/{id}/working-copy/upload/abort")
+    public ResponseEntity<Void> abortWorkingCopyUpload(
+            @PathVariable String id,
+            @RequestParam String uploadId) throws Exception {
+        unifiedWorkflowService.abortWorkingCopyUpload(id, uploadId, getEmail());
+        return ResponseEntity.ok().build();
+    }
+
+    @Operation(summary = "Finalize owner working-copy save — overwrites _signed.pdf and persists field edits (until finalized)")
+    @SecurityRequirement(name = "bearerAuth")
+    @PostMapping("/{id}/working-copy/complete")
+    public ResponseEntity<ContractResponse> completeWorkingCopy(
+            @PathVariable String id,
+            @RequestBody FlowCompleteRequest request) throws Exception {
+        return ResponseEntity.ok(unifiedWorkflowService.completeWorkingCopy(id, request, getEmail()));
+    }
+
     @Operation(summary = "Get current PDF URL — returns latest signed PDF if any approver has signed, else original")
     @SecurityRequirement(name = "bearerAuth")
     @GetMapping("/{id}/flow/file-url")
-    public ResponseEntity<Map<String, String>> getParticipantFileUrl(
+    public ResponseEntity<Map<String, Object>> getParticipantFileUrl(
             @PathVariable String id) throws Exception {
         return ResponseEntity.ok(unifiedWorkflowService.getParticipantFileUrl(id, getEmail()));
     }

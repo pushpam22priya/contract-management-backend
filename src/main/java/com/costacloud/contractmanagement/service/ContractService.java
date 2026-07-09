@@ -14,6 +14,8 @@ import io.minio.http.Method;
 import io.minio.messages.Part;
 import io.minio.GetObjectArgs;
 import io.minio.RemoveObjectArgs;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
@@ -21,6 +23,7 @@ import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.stereotype.Service;
 
+import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.io.PushbackInputStream;
 import java.time.LocalDate;
@@ -37,6 +40,8 @@ import java.util.stream.Collectors;
 
 @Service
 public class ContractService {
+
+    private static final Logger log = LoggerFactory.getLogger(ContractService.class);
 
     private final ContractRepository contractRepository;
     private final MinioClient minioClient;
@@ -211,7 +216,7 @@ public class ContractService {
     public void uploadFile(String id, InputStream inputStream, long fileSize, String email) throws Exception {
         Contract contract = findByIdAndOwner(id, email);
         PushbackInputStream pis = validatePdf(inputStream);
-        String objectKey = "contracts/" + id + ".pdf";
+        String objectKey = resolveOwnerWriteKey(id);
         long partSize = fileSize == -1 ? 10 * 1024 * 1024 : -1;
 
         minioClient.putObject(PutObjectArgs.builder()
@@ -222,8 +227,65 @@ public class ContractService {
                 .build());
 
         contract.setFileUploaded(true);
+        finishOwnerWrite(contract, objectKey);
         contract.setUpdatedAt(LocalDateTime.now());
         contractRepository.save(contract);
+    }
+
+    /**
+     * Which object an owner base-file upload should write to. Once the working copy exists it is the
+     * single source of truth, so the owner writes there and the original .pdf stays pristine. Before
+     * it exists (first upload, or after a rejection archived it) the write goes to the original .pdf,
+     * which is then mirrored into _signed.
+     */
+    private String resolveOwnerWriteKey(String id) {
+        String signedKey = "contracts/" + id + "_signed.pdf";
+        return objectExistsInMinio(signedKey) ? signedKey : "contracts/" + id + ".pdf";
+    }
+
+    /**
+     * After an owner base-file write: if we wrote _signed directly, just record the key; if we wrote
+     * the original (first upload), mirror it into _signed so everyone reads the working copy from now.
+     */
+    private void finishOwnerWrite(Contract contract, String writtenKey) {
+        if (writtenKey.endsWith("_signed.pdf")) {
+            contract.setSignedPdfKey(writtenKey);
+        } else {
+            mirrorOriginalToWorkingCopy(contract);
+        }
+    }
+
+    /**
+     * Creates/refreshes the working copy contracts/{id}_signed.pdf from the just-uploaded original,
+     * so the _signed copy exists from the moment the contract is first created and is the single
+     * source of truth everyone reads. Runs only in DRAFT (owner-controlled) — never during an active
+     * review/approval/signature flow (which would clobber participants' in-flight edits) and never in
+     * a rejected state (where the flow deliberately falls back to the original).
+     */
+    private void mirrorOriginalToWorkingCopy(Contract contract) {
+        if (contract.getStatus() != ContractStatus.DRAFT) {
+            return;
+        }
+        String originalKey = "contracts/" + contract.getId() + ".pdf";
+        String signedKey = "contracts/" + contract.getId() + "_signed.pdf";
+        // Copy via read + write (same approach as SignatureService.finalizeContract) rather than
+        // server-side copyObject, which is not reliable in this MinIO deployment.
+        try (InputStream is = minioClient.getObject(
+                GetObjectArgs.builder().bucket(bucketName).object(originalKey).build())) {
+            byte[] bytes = is.readAllBytes();
+            minioClient.putObject(PutObjectArgs.builder()
+                    .bucket(bucketName)
+                    .object(signedKey)
+                    .stream(new ByteArrayInputStream(bytes), bytes.length, -1)
+                    .contentType("application/pdf")
+                    .build());
+            contract.setSignedPdfKey(signedKey);
+            log.info("Created working copy {} from original for contract {}", signedKey, contract.getId());
+        } catch (Exception e) {
+            // Non-fatal: the read resolver still falls back to the original if the copy fails.
+            log.warn("Could not create working copy from original for contract {}: {}",
+                    contract.getId(), e.getMessage());
+        }
     }
 
     // ─── Presigned View URL ───────────────────────────────────────
@@ -280,7 +342,7 @@ public class ContractService {
 
     public ChunkUploadInitResponse initiateChunkedUpload(String id, String email) throws Exception {
         findByIdAndOwner(id, email);
-        String objectKey = "contracts/" + id + ".pdf";
+        String objectKey = resolveOwnerWriteKey(id);
         String uploadId = customMinioClient.startMultipartUpload(bucketName, objectKey);
         mongoTemplate.updateFirst(
                 Query.query(Criteria.where("id").is(id)),
@@ -292,7 +354,7 @@ public class ContractService {
 
     public String generatePresignedPartUrl(String id, String uploadId, int partNumber, String email) throws Exception {
         findByIdAndOwner(id, email);
-        String objectKey = "contracts/" + id + ".pdf";
+        String objectKey = resolveOwnerWriteKey(id);
         Map<String, String> queryParams = new HashMap<>();
         queryParams.put("uploadId", uploadId);
         queryParams.put("partNumber", String.valueOf(partNumber));
@@ -309,7 +371,7 @@ public class ContractService {
 
     public void completeChunkedUpload(String id, ChunkCompleteRequest request, String email) throws Exception {
         Contract contract = findByIdAndOwner(id, email);
-        String objectKey = "contracts/" + id + ".pdf";
+        String objectKey = resolveOwnerWriteKey(id);
         List<Part> parts = new ArrayList<>();
         for (ChunkCompleteRequest.Part p : request.getParts()) {
             parts.add(new Part(p.getPartNumber(), p.getETag()));
@@ -336,13 +398,14 @@ public class ContractService {
 
         contract.setFileUploaded(true);
         contract.setUploadId(null);
+        finishOwnerWrite(contract, objectKey);
         contract.setUpdatedAt(LocalDateTime.now());
         contractRepository.save(contract);
     }
 
     public void abortChunkedUpload(String id, String uploadId, String email) throws Exception {
         findByIdAndOwner(id, email);
-        String objectKey = "contracts/" + id + ".pdf";
+        String objectKey = resolveOwnerWriteKey(id);
         customMinioClient.cancelMultipartUpload(bucketName, objectKey, uploadId);
         mongoTemplate.updateFirst(
                 Query.query(Criteria.where("id").is(id)),
