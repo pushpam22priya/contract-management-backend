@@ -82,7 +82,9 @@ public class SignatureService {
         Contract contract = loadContractForOwner(contractId, callerEmail);
 
         ContractStatus status = contract.getStatus();
-        if (status != ContractStatus.READY_FOR_SIGNATURE && status != ContractStatus.IN_SIGNATURE) {
+        if (status != ContractStatus.DRAFT
+                && status != ContractStatus.READY_FOR_SIGNATURE
+                && status != ContractStatus.IN_SIGNATURE) {
             if (status == ContractStatus.SIGNED_BY_EVERYONE || status == ContractStatus.SIGNED) {
                 // Allow re-share only when there are parties that still have no signer assigned
                 Set<String> assignedPartyIds = new HashSet<>();
