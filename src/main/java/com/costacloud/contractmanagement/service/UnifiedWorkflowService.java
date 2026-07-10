@@ -135,8 +135,9 @@ public class UnifiedWorkflowService {
         // Re-create the working copy from the owner's refreshed original, so participants in the new
         // flow (and the owner) again read/write contracts/{id}_signed.pdf as the single source of
         // truth — starting from the fresh document the owner just uploaded, not the old annotated one.
-        String originalKey = "contracts/" + contract.getId() + ".pdf";
-        String signedKey = "contracts/" + contract.getId() + "_signed.pdf";
+        String originalKey  = "contracts/" + contract.getId() + ".pdf";
+        String signedKey    = "contracts/" + contract.getId() + "_signed.pdf";
+        String rejectedKey  = "contracts/" + contract.getId() + "_rejected.pdf";
         try {
             copyPdfInMinio(originalKey, signedKey);
             contract.setSignedPdfKey(signedKey);
@@ -144,6 +145,16 @@ public class UnifiedWorkflowService {
             log.warn("Could not re-create working copy on resubmit for contract {}: {}",
                     contract.getId(), e.getMessage());
             contract.setSignedPdfKey(null);
+        }
+
+        // Clean up the rejected archive — it is superseded by the fresh working copy above
+        try {
+            minioClient.removeObject(RemoveObjectArgs.builder()
+                    .bucket(bucketName)
+                    .object(rejectedKey)
+                    .build());
+        } catch (Exception e) {
+            log.debug("No rejected PDF to clean up on resubmit for contract {}", contract.getId());
         }
 
         List<ParticipantAssignment> newAssignments = request.getParticipants();
@@ -570,10 +581,17 @@ public class UnifiedWorkflowService {
             throw new NotFoundException("Contract not found");
         }
 
-        String signedKey = "contracts/" + id + "_signed.pdf";
-        String originalKey = "contracts/" + id + ".pdf";
-        boolean isSignedCopy = objectExistsInMinio(signedKey);
-        String objectKey = isSignedCopy ? signedKey : originalKey;
+        String signedKey    = "contracts/" + id + "_signed.pdf";
+        String rejectedKey  = "contracts/" + id + "_rejected.pdf";
+        String originalKey  = "contracts/" + id + ".pdf";
+
+        boolean hasSignedCopy   = objectExistsInMinio(signedKey);
+        boolean hasRejectedCopy = !hasSignedCopy && objectExistsInMinio(rejectedKey);
+        // Both _signed.pdf and _rejected.pdf have baked-in ink signatures — no XFDF overlay allowed.
+        boolean isSignedCopy    = hasSignedCopy || hasRejectedCopy;
+        String objectKey = hasSignedCopy   ? signedKey
+                         : hasRejectedCopy ? rejectedKey
+                         : originalKey;
 
         String url = minioClient.getPresignedObjectUrl(
                 GetPresignedObjectUrlArgs.builder()

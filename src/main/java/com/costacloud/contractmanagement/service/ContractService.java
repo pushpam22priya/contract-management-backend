@@ -251,7 +251,21 @@ public class ContractService {
         if (writtenKey.endsWith("_signed.pdf")) {
             contract.setSignedPdfKey(writtenKey);
         } else {
+            // Owner wrote a new base file — the rejected archive (if any) is now superseded
+            deleteRejectedPdfIfExists(contract.getId());
             mirrorOriginalToWorkingCopy(contract);
+        }
+    }
+
+    private void deleteRejectedPdfIfExists(String contractId) {
+        String rejectedKey = "contracts/" + contractId + "_rejected.pdf";
+        try {
+            minioClient.removeObject(RemoveObjectArgs.builder()
+                    .bucket(bucketName)
+                    .object(rejectedKey)
+                    .build());
+        } catch (Exception e) {
+            // File may not exist — silently ignore
         }
     }
 
@@ -312,9 +326,12 @@ public class ContractService {
             throw new BadRequestException("File not yet uploaded for this contract");
         }
 
-        String signedKey   = "contracts/" + id + "_signed.pdf";
-        String originalKey = "contracts/" + id + ".pdf";
-        String objectKey   = objectExistsInMinio(signedKey) ? signedKey : originalKey;
+        String signedKey    = "contracts/" + id + "_signed.pdf";
+        String rejectedKey  = "contracts/" + id + "_rejected.pdf";
+        String originalKey  = "contracts/" + id + ".pdf";
+        String objectKey    = objectExistsInMinio(signedKey)   ? signedKey
+                            : objectExistsInMinio(rejectedKey) ? rejectedKey
+                            : originalKey;
 
         return minioClient.getPresignedObjectUrl(
                 GetPresignedObjectUrlArgs.builder()
