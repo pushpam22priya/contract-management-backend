@@ -146,17 +146,20 @@ class SignatureServiceSubmitTest {
         }
 
         @Test
-        @DisplayName("throws BadRequestException when contract status is DRAFT")
-        void shouldThrow_whenStatusIsDraft() {
+        @DisplayName("allows direct submission when contract status is DRAFT")
+        void shouldSucceed_whenStatusIsDraft() {
             Contract c = readyContract();
             c.setStatus(ContractStatus.DRAFT);
             when(contractRepository.findById(CONTRACT_ID)).thenReturn(Optional.of(c));
+            when(contractRepository.save(any())).thenAnswer(i -> i.getArgument(0));
+            lenient().doNothing().when(emailService).sendSignatureRequestEmail(
+                any(), any(), any(), any(), any(), any(), any(), any(), any());
 
-            BadRequestException ex = assertThrows(BadRequestException.class, () ->
-                signatureService.submitForSignature(CONTRACT_ID, requestWith(), OWNER_EMAIL)
-            );
+            signatureService.submitForSignature(CONTRACT_ID, requestWith(
+                externalAssignment("party_1", SIGNER_EMAIL, 1)
+            ), OWNER_EMAIL);
 
-            assertTrue(ex.getMessage().contains("Contract must be ready for signature"));
+            assertEquals(ContractStatus.IN_SIGNATURE, captureLastSavedContract().getStatus());
         }
 
         @Test
