@@ -119,10 +119,11 @@ Effective status computation (mirrors ContractListResponse):
 | **Only EXPIRED contracts can be terminated** | The effective computed status must be `EXPIRED`. Any other status — ACTIVE, EXPIRING, DRAFT, IN_REVIEW, IN_APPROVAL, READY_FOR_SIGNATURE, IN_SIGNATURE, SIGNED_BY_EVERYONE, REJECTED_* — returns 400. |
 | **Termination is irreversible** | Once status is set to `TERMINATED`, no endpoint changes it back. |
 | **TERMINATED is idempotent** | Calling terminate on an already-terminated contract returns `{ success: true, alreadyTerminated: true }` with HTTP 200 — no error is thrown. |
-| **Active renewal blocks termination** | If the contract has a renewal draft in progress (`renewalStatus == "in_progress"`), termination is blocked with HTTP 409. The renewal must be cancelled or completed first. |
+| **Active renewal blocks termination** | If the contract has a renewal draft in progress (`renewalStatus == "in_progress"`), termination is blocked with HTTP 409. The renewal must be cancelled (`POST /{id}/cancel-renewal`) or completed first. |
 | **Ownership enforced** | Only the contract owner (`createdBy`) can terminate. Any other authenticated user receives 404 (not 403) to prevent leaking contract IDs. |
 | **terminatedBy is taken from JWT** | The acting user's email is read from the JWT token — the request body is empty. The frontend does not supply `terminatedBy`. |
 | **Renewal linkage is cleared on success** | `renewalStatus` and `renewedContractId` are set to `null` on the terminated contract. |
+| **Renewal linkage is now automatic** | `renewalStatus`/`renewedContractId` are set on the original the moment its renewal draft's PDF is uploaded — this no longer depends on the frontend explicitly calling `POST /confirm-renewal`. Once the renewal is finalized, `renewalStatus` becomes `"completed"` (not `"in_progress"`), which un-blocks termination. |
 | **terminatedAt is server-set** | The termination timestamp is always set by the server (`LocalDateTime.now()`) — the client never provides it. |
 
 ---
@@ -423,7 +424,7 @@ These fields are added to the `Contract` model now because:
 
 | Field | Type | Used By | Description |
 |---|---|---|---|
-| `renewalStatus` | `String \| null` | Termination (409 guard) | `"in_progress"` when a renewal draft has been saved. `null` otherwise. Cleared on termination. |
+| `renewalStatus` | `String \| null` | Termination (409 guard) | `"in_progress"` while a renewal draft is active, `"completed"` once the renewal is finalized, `null` otherwise. Cleared on termination or via `POST /{id}/cancel-renewal`. |
 | `renewedContractId` | `String \| null` | Termination (cleared on success) | ID of the renewal draft contract created from this one. Cleared on termination. |
 | `renewedFromId` | `String \| null` | Future renewal feature | ID of the original contract this was renewed from. Set when creating a renewal draft. |
 | `renewalStartDate` | `String \| null` | Future renewal feature | ISO date string — start date of the pending renewal, shown as tooltip in UI. |
@@ -510,8 +511,8 @@ After either success response, the frontend calls `loadContracts()` to refresh t
 |---|---|
 | Send `terminatedBy` in the request body | It is ignored. The backend uses the JWT email. |
 | Allow the Terminate button for ACTIVE or EXPIRING contracts | The backend will return 400. Guard the button by checking `contract.status === "EXPIRED"` from the API response. |
-| Allow the Terminate button when `contract.renewalStatus === "in_progress"` | The backend will return 409. Disable or hide the Terminate button when a renewal is in flight. |
-| Re-enable the Terminate button after a 409 error | Show an error message explaining that the renewal must be resolved first. |
+| Allow the Terminate button when `contract.renewalStatus === "in_progress"` | The backend will return 409. Disable or hide the Terminate button while a renewal is in flight; it's safe to re-enable once `renewalStatus` becomes `"completed"` or `null`. |
+| Re-enable the Terminate button after a 409 error | Show an error message explaining that the renewal must be resolved first — either let it complete, or call `POST /{id}/cancel-renewal` to abandon it. |
 | Attempt to change status back from TERMINATED | No endpoint supports undoing termination. |
 
 ---

@@ -180,6 +180,20 @@ public class ContractController {
         return ResponseEntity.ok().build();
     }
 
+    @Operation(
+        summary = "Cancel a renewal in progress",
+        description = "Clears the renewal link on the original contract (renewalStatus, " +
+                      "renewedContractId, renewalStartDate). Use when a renewal draft was " +
+                      "rejected/abandoned and the original needs to become terminable/visible " +
+                      "again. Fails if the renewal has already completed (SIGNED/ACTIVE). " +
+                      "Idempotent: safe to call twice.")
+    @SecurityRequirement(name = "bearerAuth")
+    @PostMapping("/{id}/cancel-renewal")
+    public ResponseEntity<Void> cancelRenewal(@PathVariable String id) {
+        contractRenewalService.cancelRenewal(id, getEmail());
+        return ResponseEntity.ok().build();
+    }
+
 
     private String getEmail() {
         return (String) SecurityContextHolder.getContext().getAuthentication().getPrincipal();

@@ -144,27 +144,89 @@ public class ContractRenewalService {
                     "Please upload the renewal contract PDF before submitting");
         }
 
-        // 4. Fetch original
+        linkToOriginal(renewal);
+    }
+
+    /**
+     * Called automatically by the workflow/signature services when a DRAFT contract
+     * that happens to be a renewal is about to leave DRAFT (fresh flow submit or direct
+     * send-for-signature). No-op for ordinary contracts. This ensures the original
+     * contract's renewal linkage can never be skipped by forgetting to call
+     * confirmRenewal() explicitly.
+     */
+    public void linkRenewalIfApplicable(Contract renewal) {
+        if (renewal.getRenewedFromId() == null) {
+            return;
+        }
+        if (!renewal.isFileUploaded()) {
+            throw new BadRequestException(
+                    "Please upload the renewal contract PDF before submitting");
+        }
+        linkToOriginal(renewal);
+    }
+
+    private void linkToOriginal(Contract renewal) {
+        // Fetch original
         Contract original = contractRepository.findById(renewal.getRenewedFromId())
                 .orElseThrow(() -> new NotFoundException("Original contract not found"));
 
-        // 5. Idempotency — already confirmed for this renewal
-        if (renewalId.equals(original.getRenewedContractId())) {
+        // Idempotency — already confirmed for this renewal
+        if (renewal.getId().equals(original.getRenewedContractId())) {
             return;
         }
 
-        // 6. Conflict guard — original already confirmed a different renewal
+        // Conflict guard — original already confirmed a different renewal
         if ("in_progress".equals(original.getRenewalStatus())
-                && original.getRenewedContractId() != null) {
+                && original.getRenewedContractId() != null
+                && !renewal.getId().equals(original.getRenewedContractId())) {
             throw new ConflictException(
                     "This contract already has a different renewal in progress");
         }
 
-        // 7. Mark the original contract
+        // Mark the original contract
         original.setRenewalStatus("in_progress");
-        original.setRenewedContractId(renewalId);
+        original.setRenewedContractId(renewal.getId());
         original.setRenewalStartDate(
                 renewal.getStartDate() != null ? renewal.getStartDate().toString() : null);
+        original.setUpdatedAt(LocalDateTime.now());
+        contractRepository.save(original);
+    }
+
+    // ─── Cancel Renewal ───────────────────────────────────────────────────────
+
+    /**
+     * Clears the renewal link on the original contract. Use when a renewal draft was
+     * rejected/abandoned and the original needs to become terminable/visible again.
+     * Fails if the linked renewal has already completed (effective status
+     * SIGNED/ACTIVE/EXPIRING/EXPIRED). Idempotent: safe to call twice.
+     */
+    public void cancelRenewal(String originalId, String email) {
+        Contract original = contractRepository.findById(originalId)
+                .orElseThrow(() -> new NotFoundException("Contract not found"));
+
+        if (!original.getCreatedBy().equals(email)) {
+            throw new NotFoundException("Contract not found");
+        }
+
+        if (original.getRenewalStatus() == null && original.getRenewedContractId() == null) {
+            return; // idempotent no-op — nothing to cancel
+        }
+
+        if (original.getRenewedContractId() != null) {
+            Optional<Contract> renewalOpt = contractRepository.findById(original.getRenewedContractId());
+            if (renewalOpt.isPresent()) {
+                ContractStatus effective = computeEffectiveStatus(renewalOpt.get());
+                if (effective == ContractStatus.SIGNED || effective == ContractStatus.ACTIVE
+                        || effective == ContractStatus.EXPIRING || effective == ContractStatus.EXPIRED) {
+                    throw new BadRequestException(
+                            "Cannot cancel — the renewal has already been completed");
+                }
+            }
+        }
+
+        original.setRenewalStatus(null);
+        original.setRenewedContractId(null);
+        original.setRenewalStartDate(null);
         original.setUpdatedAt(LocalDateTime.now());
         contractRepository.save(original);
     }
