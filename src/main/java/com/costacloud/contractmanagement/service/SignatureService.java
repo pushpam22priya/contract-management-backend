@@ -45,6 +45,7 @@ public class SignatureService {
     private final MinioClient minioClient;
     private final CustomMinioClient customMinioClient;
     private final MongoTemplate mongoTemplate;
+    private final ContractRenewalService contractRenewalService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Value("${minio.bucket-name}")
@@ -62,7 +63,8 @@ public class SignatureService {
                             EmailService emailService,
                             MinioClient minioClient,
                             CustomMinioClient customMinioClient,
-                            MongoTemplate mongoTemplate) {
+                            MongoTemplate mongoTemplate,
+                            ContractRenewalService contractRenewalService) {
         this.contractRepository = contractRepository;
         this.signatureRequestRepository = signatureRequestRepository;
         this.autoAdvanceService = autoAdvanceService;
@@ -70,6 +72,7 @@ public class SignatureService {
         this.minioClient = minioClient;
         this.customMinioClient = customMinioClient;
         this.mongoTemplate = mongoTemplate;
+        this.contractRenewalService = contractRenewalService;
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -108,6 +111,10 @@ public class SignatureService {
         if (!contract.isFileUploaded()) {
             throw new BadRequestException(
                     "Contract file must be uploaded before sending for signature");
+        }
+
+        if (status == ContractStatus.DRAFT && contract.getRenewedFromId() != null) {
+            contractRenewalService.linkRenewalIfApplicable(contract);
         }
 
         List<SignerAssignmentDto> assignments = request.getAssignments();
@@ -296,16 +303,11 @@ public class SignatureService {
 
                 String signingUrl  = baseUrl + "/sign/" + ext.getToken();
                 String partyColor = resolvePartyColor(contract, ext.getPartyId());
-                try {
-                    emailService.sendSignatureRequestEmail(
-                            ext.getEmail(), ext.getName(), senderName, callerEmail,
-                            contract.getTitle(), signingUrl, sr.getExpiresAt(),
-                            ext.getPartyLabel(), partyColor
-                    );
-                } catch (RuntimeException emailEx) {
-                    log.error("SIGNATURE EMAIL NOT SENT — contract={}, signer={}: {}",
-                            contractId, ext.getEmail(), emailEx.getMessage());
-                }
+                emailService.sendSignatureRequestEmail(
+                        ext.getEmail(), ext.getName(), senderName, callerEmail,
+                        contract.getTitle(), signingUrl, sr.getExpiresAt(),
+                        ext.getPartyLabel(), partyColor
+                );
             }
         }
 
@@ -657,14 +659,36 @@ public class SignatureService {
         String signedKey = "contracts/" + contractId + "_signed.pdf";
         String finalKey = "contracts/" + contractId + "_final.pdf";
 
+        // TEMP DIAGNOSTIC TIMING — remove once the finalize-latency investigation is done
+        long t0 = System.currentTimeMillis();
         byte[] finalPdfBytes = readFromMinio(signedKey);
+        long t1 = System.currentTimeMillis();
+        log.info("[finalize-timing] contract={} readFromMinio took {} ms ({} bytes)",
+                contractId, t1 - t0, finalPdfBytes.length);
+
         writeRawPdfToMinio(finalKey, finalPdfBytes);
+        long t2 = System.currentTimeMillis();
+        log.info("[finalize-timing] contract={} writeRawPdfToMinio took {} ms", contractId, t2 - t1);
 
         contract.setFinalPdfKey(finalKey);
         contract.setStatus(ContractStatus.SIGNED);
         contract.setSignatureFlowStatus("finalized");
         contract.setUpdatedAt(LocalDateTime.now());
         contractRepository.save(contract);
+        long t3 = System.currentTimeMillis();
+        log.info("[finalize-timing] contract={} contractRepository.save took {} ms", contractId, t3 - t2);
+
+        if (contract.getRenewedFromId() != null) {
+            contractRepository.findById(contract.getRenewedFromId()).ifPresent(original -> {
+                if (contract.getId().equals(original.getRenewedContractId())) {
+                    original.setRenewalStatus("completed");
+                    original.setUpdatedAt(LocalDateTime.now());
+                    contractRepository.save(original);
+                }
+            });
+        }
+        long t4 = System.currentTimeMillis();
+        log.info("[finalize-timing] contract={} renewal-completion hook took {} ms", contractId, t4 - t3);
 
         String downloadUrl = baseUrl + "/contracts/" + contractId + "/final-pdf";
 
@@ -675,6 +699,9 @@ public class SignatureService {
         orEmpty(contract.getInternalSigners()).forEach(s ->
                 emailService.sendSignedCopyEmail(s.getEmail(), s.getName(),
                         contract.getTitle(), downloadUrl));
+        long t5 = System.currentTimeMillis();
+        log.info("[finalize-timing] contract={} email sending took {} ms", contractId, t5 - t4);
+        log.info("[finalize-timing] contract={} TOTAL finalizeContract took {} ms", contractId, t5 - t0);
 
         return new ContractResponse(contract);
     }

@@ -6,6 +6,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.mail.MailException;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.mail.javamail.MimeMessageHelper;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import jakarta.mail.internet.MimeMessage;
@@ -18,6 +19,10 @@ public class EmailService {
     private static final Logger log = LoggerFactory.getLogger(EmailService.class);
     private static final DateTimeFormatter DATE_FMT  = DateTimeFormatter.ofPattern("EEEE, MMMM d, yyyy");
     private static final DateTimeFormatter SHORT_FMT = DateTimeFormatter.ofPattern("dd MMM yyyy");
+
+    private static final int SIGNATURE_EMAIL_MAX_ATTEMPTS = 3;
+    // Not final so tests can shrink this via ReflectionTestUtils and run at full speed.
+    private long signatureEmailRetryDelayMs = 2000;
 
     private final JavaMailSender mailSender;
 
@@ -32,51 +37,76 @@ public class EmailService {
     }
 
     // ─── Email 1: Signature Request ──────────────────────────────
+    // Dispatched off the request thread — every caller already treats a failed
+    // send as non-fatal (log and continue), so a slow SMTP round-trip should
+    // never hold up the HTTP response of submit-for-signature.
 
+    @Async("emailTaskExecutor")
     public void sendSignatureRequestEmail(String toEmail, String toName,
                                           String senderName, String senderEmail,
                                           String contractTitle, String signingUrl,
                                           LocalDateTime expiresAt,
                                           String partyLabel, String partyColor) {
+        for (int attempt = 1; attempt <= SIGNATURE_EMAIL_MAX_ATTEMPTS; attempt++) {
+            try {
+                MimeMessage message = mailSender.createMimeMessage();
+                MimeMessageHelper helper = new MimeMessageHelper(message, true, "UTF-8");
+
+                helper.setFrom(fromAddress);
+                helper.setReplyTo(senderEmail);
+                helper.setTo(toEmail);
+                helper.setSubject("\"" + contractTitle + "\" is ready for your signature");
+
+                String expiryLong  = expiresAt != null ? expiresAt.format(DATE_FMT)  : "7 days from now";
+                String expiryShort = expiresAt != null ? expiresAt.format(SHORT_FMT) : "7 days";
+                String sentDate    = LocalDateTime.now().format(DATE_FMT);
+                String color       = (partyColor != null && !partyColor.isBlank()) ? partyColor : "#0e7c6b";
+                String label       = (partyLabel != null && !partyLabel.isBlank()) ? partyLabel : "";
+
+                String plain = (toName != null && !toName.isBlank() ? "Hi " + toName : "Hi there") + ",\n\n"
+                        + senderName + " has sent you a contract for your digital signature.\n\n"
+                        + "Party    : " + label + "\n"
+                        + "Contract : " + contractTitle + "\n"
+                        + "Sent by  : " + senderName + " (" + senderEmail + ")\n"
+                        + "Expires  : " + expiryShort + "\n\n"
+                        + "Review & Sign: " + signingUrl + "\n\n"
+                        + "This link expires on " + expiryShort + ". After signing, you will receive "
+                        + "a copy of the signed document by email.\n\n"
+                        + "If you have questions, reply to this email — replies go directly to " + senderName + ".";
+
+                helper.setText(plain, buildSignatureRequestHtml(
+                        contractTitle, senderName, senderEmail, sentDate,
+                        signingUrl, expiryLong, label, color));
+                mailSender.send(message);
+                return;
+
+            } catch (MailException | jakarta.mail.MessagingException e) {
+                if (attempt == SIGNATURE_EMAIL_MAX_ATTEMPTS) {
+                    log.error("SIGNATURE EMAIL NOT SENT after {} attempts — signer={}: {}",
+                            SIGNATURE_EMAIL_MAX_ATTEMPTS, toEmail, e.getMessage(), e);
+                } else {
+                    log.warn("Signature email attempt {}/{} failed for signer={}: {} — retrying",
+                            attempt, SIGNATURE_EMAIL_MAX_ATTEMPTS, toEmail, e.getMessage());
+                    sleepBeforeRetry(attempt);
+                }
+            }
+        }
+    }
+
+    private void sleepBeforeRetry(int attempt) {
         try {
-            MimeMessage message = mailSender.createMimeMessage();
-            MimeMessageHelper helper = new MimeMessageHelper(message, true, "UTF-8");
-
-            helper.setFrom(fromAddress);
-            helper.setReplyTo(senderEmail);
-            helper.setTo(toEmail);
-            helper.setSubject("\"" + contractTitle + "\" is ready for your signature");
-
-            String expiryLong  = expiresAt != null ? expiresAt.format(DATE_FMT)  : "7 days from now";
-            String expiryShort = expiresAt != null ? expiresAt.format(SHORT_FMT) : "7 days";
-            String sentDate    = LocalDateTime.now().format(DATE_FMT);
-            String color       = (partyColor != null && !partyColor.isBlank()) ? partyColor : "#0e7c6b";
-            String label       = (partyLabel != null && !partyLabel.isBlank()) ? partyLabel : "";
-
-            String plain = (toName != null && !toName.isBlank() ? "Hi " + toName : "Hi there") + ",\n\n"
-                    + senderName + " has sent you a contract for your digital signature.\n\n"
-                    + "Party    : " + label + "\n"
-                    + "Contract : " + contractTitle + "\n"
-                    + "Sent by  : " + senderName + " (" + senderEmail + ")\n"
-                    + "Expires  : " + expiryShort + "\n\n"
-                    + "Review & Sign: " + signingUrl + "\n\n"
-                    + "This link expires on " + expiryShort + ". After signing, you will receive "
-                    + "a copy of the signed document by email.\n\n"
-                    + "If you have questions, reply to this email — replies go directly to " + senderName + ".";
-
-            helper.setText(plain, buildSignatureRequestHtml(
-                    contractTitle, senderName, senderEmail, sentDate,
-                    signingUrl, expiryLong, label, color));
-            mailSender.send(message);
-
-        } catch (MailException | jakarta.mail.MessagingException e) {
-            log.error("Failed to send signature request email to {}: {}", toEmail, e.getMessage(), e);
-            throw new RuntimeException("Email delivery failed for " + toEmail + ": " + e.getMessage(), e);
+            Thread.sleep(signatureEmailRetryDelayMs * attempt);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
         }
     }
 
     // ─── Email 2: Signed Copy (after finalization) ───────────────
+    // Sent after the contract's own DB state has already been committed —
+    // dispatched off the request thread so a slow SMTP round-trip never
+    // holds up the HTTP response to the caller of finalize().
 
+    @Async("emailTaskExecutor")
     public void sendSignedCopyEmail(String toEmail, String toName,
                                     String contractTitle, String downloadUrl) {
         try {
