@@ -42,6 +42,7 @@ public class UnifiedWorkflowService {
     private final CustomMinioClient customMinioClient;
     private final MinioClient minioClient;
     private final MongoTemplate mongoTemplate;
+    private final ContractRenewalService contractRenewalService;
 
     @Value("${minio.bucket-name}")
     private String bucketName;
@@ -50,12 +51,14 @@ public class UnifiedWorkflowService {
                                   SignatureService signatureService,
                                   CustomMinioClient customMinioClient,
                                   MinioClient minioClient,
-                                  MongoTemplate mongoTemplate) {
+                                  MongoTemplate mongoTemplate,
+                                  ContractRenewalService contractRenewalService) {
         this.contractRepository = contractRepository;
         this.signatureService = signatureService;
         this.customMinioClient = customMinioClient;
         this.minioClient = minioClient;
         this.mongoTemplate = mongoTemplate;
+        this.contractRenewalService = contractRenewalService;
     }
 
     // ─── Submit ───────────────────────────────────────────────────
@@ -78,6 +81,10 @@ public class UnifiedWorkflowService {
         }
 
         validateParticipants(request.getParticipants(), callerEmail);
+
+        if (status == ContractStatus.DRAFT && contract.getRenewedFromId() != null) {
+            contractRenewalService.linkRenewalIfApplicable(contract);
+        }
 
         if (status == ContractStatus.DRAFT) {
             handleFreshSubmit(contract, request, callerEmail);

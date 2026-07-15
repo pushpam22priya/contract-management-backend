@@ -47,6 +47,7 @@ public class ContractService {
     private final MinioClient minioClient;
     private final CustomMinioClient customMinioClient;
     private final MongoTemplate mongoTemplate;
+    private final ContractRenewalService contractRenewalService;
 
     @Value("${minio.bucket-name}")
     private String bucketName;
@@ -54,11 +55,13 @@ public class ContractService {
     public ContractService(ContractRepository contractRepository,
                            MinioClient minioClient,
                            CustomMinioClient customMinioClient,
-                           MongoTemplate mongoTemplate) {
+                           MongoTemplate mongoTemplate,
+                           ContractRenewalService contractRenewalService) {
         this.contractRepository = contractRepository;
         this.minioClient = minioClient;
         this.customMinioClient = customMinioClient;
         this.mongoTemplate = mongoTemplate;
+        this.contractRenewalService = contractRenewalService;
     }
 
     // ─── Create ──────────────────────────────────────────────────
@@ -230,6 +233,10 @@ public class ContractService {
         finishOwnerWrite(contract, objectKey);
         contract.setUpdatedAt(LocalDateTime.now());
         contractRepository.save(contract);
+
+        if (contract.getRenewedFromId() != null) {
+            contractRenewalService.linkRenewalIfApplicable(contract);
+        }
     }
 
     /**
@@ -418,6 +425,10 @@ public class ContractService {
         finishOwnerWrite(contract, objectKey);
         contract.setUpdatedAt(LocalDateTime.now());
         contractRepository.save(contract);
+
+        if (contract.getRenewedFromId() != null) {
+            contractRenewalService.linkRenewalIfApplicable(contract);
+        }
     }
 
     public void abortChunkedUpload(String id, String uploadId, String email) throws Exception {
