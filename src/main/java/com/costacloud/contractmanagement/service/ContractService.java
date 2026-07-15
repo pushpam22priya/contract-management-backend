@@ -8,6 +8,7 @@ import com.costacloud.contractmanagement.exception.NotFoundException;
 import com.costacloud.contractmanagement.model.Contract;
 import com.costacloud.contractmanagement.model.ContractStatus;
 import com.costacloud.contractmanagement.repository.ContractRepository;
+import com.costacloud.contractmanagement.repository.SignatureRequestRepository;
 import io.minio.*;
 import io.minio.errors.ErrorResponseException;
 import io.minio.http.Method;
@@ -48,6 +49,7 @@ public class ContractService {
     private final CustomMinioClient customMinioClient;
     private final MongoTemplate mongoTemplate;
     private final ContractRenewalService contractRenewalService;
+    private final SignatureRequestRepository signatureRequestRepository;
 
     @Value("${minio.bucket-name}")
     private String bucketName;
@@ -56,12 +58,14 @@ public class ContractService {
                            MinioClient minioClient,
                            CustomMinioClient customMinioClient,
                            MongoTemplate mongoTemplate,
-                           ContractRenewalService contractRenewalService) {
+                           ContractRenewalService contractRenewalService,
+                           SignatureRequestRepository signatureRequestRepository) {
         this.contractRepository = contractRepository;
         this.minioClient = minioClient;
         this.customMinioClient = customMinioClient;
         this.mongoTemplate = mongoTemplate;
         this.contractRenewalService = contractRenewalService;
+        this.signatureRequestRepository = signatureRequestRepository;
     }
 
     // ─── Create ──────────────────────────────────────────────────
@@ -473,6 +477,15 @@ public class ContractService {
         if ("in_progress".equals(contract.getRenewalStatus())) {
             throw new ConflictException(
                 "Cannot terminate a contract that has an active renewal in progress. Cancel or complete the renewal first."
+            );
+        }
+
+        // Block if this contract has already been superseded by a completed renewal —
+        // only the latest link in a renewal chain may ever reach TERMINATED, so that
+        // permanent deletion (see deletePermanently) always operates on a clean, linear chain.
+        if (contract.getRenewedContractId() != null) {
+            throw new ConflictException(
+                "Cannot terminate — this contract has already been renewed. Terminate the latest version in the chain instead."
             );
         }
 
